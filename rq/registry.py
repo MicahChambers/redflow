@@ -27,17 +27,13 @@ class BaseRegistry(object):
         self.cleanup()
         return self.connection.zcard(self.key)
 
-    def add(self, job, ttl=0, pipeline=None):
+    def add(self, job, ttl=0):
         """Adds a job to a registry with expiry time of now + ttl."""
         score = ttl if ttl < 0 else current_timestamp() + ttl
-        if pipeline is not None:
-            return pipeline.zadd(self.key, score, job.id)
+        return self.connection.zadd(self.key, score, job.id)
 
-        return self.connection._zadd(self.key, score, job.id)
-
-    def remove(self, job, pipeline=None):
-        connection = pipeline if pipeline is not None else self.connection
-        return connection.zrem(self.key, job.id)
+    def remove(self, job):
+        return self.connection.zrem(self.key, job.id)
 
     def get_expired_job_ids(self, timestamp=None):
         """Returns job ids whose score are less than current timestamp.
@@ -84,18 +80,17 @@ class StartedJobRegistry(BaseRegistry):
         if job_ids:
             failed_queue = FailedQueue(connection=self.connection)
 
-            with self.connection.pipeline() as pipeline:
+            with self.connection.transaction():
                 for job_id in job_ids:
                     try:
                         job = Job.fetch(job_id, connection=self.connection)
                         job.set_status(JobStatus.FAILED)
-                        job.save(pipeline=pipeline)
-                        failed_queue.push_job_id(job_id, pipeline=pipeline)
+                        job.save()
+                        failed_queue.push_job_id(job_id)
                     except NoSuchJobError:
                         pass
 
-                pipeline.zremrangebyscore(self.key, 0, score)
-                pipeline.execute()
+                self.connection.zremrangebyscore(self.key, 0, score)
 
         return job_ids
 

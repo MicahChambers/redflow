@@ -245,24 +245,24 @@ class Worker(object):
             raise ValueError(msg.format(self.name))
         key = self.key
         queues = ','.join(self.queue_names())
-        with self.connection._pipeline() as p:
-            p.delete(key)
-            p.hset(key, 'birth', utcformat(utcnow()))
-            p.hset(key, 'queues', queues)
-            p.sadd(self.redis_workers_keys, key)
-            p.expire(key, self.default_worker_ttl)
-            p.execute()
+        with self.connection.transaction():
+            self.connection.delete(key)
+            self.connection.hset(key, 'birth', utcformat(utcnow()))
+            self.connection.hset(key, 'queues', queues)
+            self.connection.sadd(self.redis_workers_keys, key)
+            self.connection.expire(key, self.default_worker_ttl)
+            self.connection.execute()
 
     def register_death(self):
         """Registers its own death."""
         self.log.debug('Registering death')
-        with self.connection._pipeline() as p:
+        with self.connection.transaction():
             # We cannot use self.state = 'dead' here, because that would
             # rollback the pipeline
-            p.srem(self.redis_workers_keys, self.key)
-            p.hset(self.key, 'death', utcformat(utcnow()))
-            p.expire(self.key, 60)
-            p.execute()
+            self.connection.srem(self.redis_workers_keys, self.key)
+            self.connection.hset(self.key, 'death', utcformat(utcnow()))
+            self.connection.expire(self.key, 60)
+            self.connection.execute()
 
     def set_shutdown_requested_date(self):
         """Sets the date on which the worker received a (warm) shutdown request"""
@@ -289,10 +289,9 @@ class Worker(object):
         if death_timestamp is not None:
             return utcparse(as_text(death_timestamp))
 
-    def set_state(self, state, pipeline=None):
+    def set_state(self, state):
         self._state = state
-        connection = pipeline if pipeline is not None else self.connection
-        connection.hset(self.key, 'state', state)
+        self.connection.hset(self.key, 'state', state)
 
     def _set_state(self, state):
         """Raise a DeprecationWarning if ``worker.state = X`` is used"""
@@ -315,17 +314,14 @@ class Worker(object):
 
     state = property(_get_state, _set_state)
 
-    def set_current_job_id(self, job_id, pipeline=None):
-        connection = pipeline if pipeline is not None else self.connection
-
+    def set_current_job_id(self, job_id):
         if job_id is None:
-            connection.hdel(self.key, 'current_job')
+            self.connection.hdel(self.key, 'current_job')
         else:
-            connection.hset(self.key, 'current_job', job_id)
+            self.connection.hset(self.key, 'current_job', job_id)
 
-    def get_current_job_id(self, pipeline=None):
-        connection = pipeline if pipeline is not None else self.connection
-        return as_text(connection.hget(self.key, 'current_job'))
+    def get_current_job_id(self):
+        return as_text(self.connection.hget(self.key, 'current_job'))
 
     def get_current_job(self):
         """Returns the job id of the currently executing job."""
@@ -487,7 +483,7 @@ class Worker(object):
         self.heartbeat()
         return result
 
-    def heartbeat(self, timeout=0, pipeline=None):
+    def heartbeat(self, timeout=0):
         """Specifies a new worker timeout, typically by extending the
         expiration time of the worker, effectively making this a "heartbeat"
         to not expire the worker until the timeout passes.
@@ -499,8 +495,7 @@ class Worker(object):
         only larger.
         """
         timeout = max(timeout, self.default_worker_ttl)
-        connection = pipeline if pipeline is not None else self.connection
-        connection.expire(self.key, timeout)
+        self.connection.expire(self.key, timeout)
         self.log.debug('Sent heartbeat to prevent worker timeout. '
                        'Next one should arrive within {0} seconds.'.format(timeout))
 
@@ -563,16 +558,14 @@ class Worker(object):
         """
         timeout = (job.timeout or 180) + 60
 
-        with self.connection._pipeline() as pipeline:
-            self.set_state(WorkerStatus.BUSY, pipeline=pipeline)
-            self.set_current_job_id(job.id, pipeline=pipeline)
-            self.heartbeat(timeout, pipeline=pipeline)
+        with self.connection.transaction():
+            self.set_state(WorkerStatus.BUSY)
+            self.set_current_job_id(job.id)
+            self.heartbeat(timeout)
             registry = StartedJobRegistry(job.origin, self.connection)
-            registry.add(job, timeout, pipeline=pipeline)
-            job.set_status(JobStatus.STARTED, pipeline=pipeline)
-            self.connection._hset(job.key, 'started_at',
-                                  utcformat(utcnow()), pipeline)
-            pipeline.execute()
+            registry.add(job, timeout)
+            job.set_status(JobStatus.STARTED)
+            self.connection.hset(job.key, 'started_at', utcformat(utcnow()))
 
         msg = 'Processing {0} from {1} since {2}'
         self.procline(msg.format(job.func_name, job.origin, time.time()))
@@ -583,6 +576,7 @@ class Worker(object):
         """
         self.prepare_job_execution(job)
 
+        ##  TODO handle here
         with self.connection._pipeline() as pipeline:
             started_job_registry = StartedJobRegistry(job.origin, self.connection)
 

@@ -151,9 +151,9 @@ class Job(object):
         )
         return self.get_status()
 
-    def set_status(self, status, pipeline=None):
+    def set_status(self, status):
         self._status = status
-        self.connection._hset(self.key, 'status', self._status, pipeline)
+        self.connection.hset(self.key, 'status', self._status)
 
     def _set_status(self, status):
         warnings.warn(
@@ -457,13 +457,12 @@ class Job(object):
 
         return obj
 
-    def save(self, pipeline=None):
+    def save(self):
         """Persists the current job instance to its corresponding Redis key."""
         key = self.key
-        connection = pipeline if pipeline is not None else self.connection
 
-        connection.hmset(key, self.to_dict())
-        self.cleanup(self.ttl, pipeline=connection)
+        self.connection.hmset(key, self.to_dict())
+        self.cleanup(self.ttl)
 
     def cancel(self):
         """Cancels the given job, which will prevent the job from ever being
@@ -474,18 +473,16 @@ class Job(object):
         cancellation.
         """
         from .queue import Queue
-        pipeline = self.connection._pipeline()
         if self.origin:
-            queue = Queue(name=self.origin, connection=self.connection)
-            queue.remove(self, pipeline=pipeline)
-        pipeline.execute()
+            with self.connection.transaction():
+                queue = Queue(name=self.origin, connection=self.connection)
+                queue.remove(self)
 
-    def delete(self, pipeline=None):
+    def delete(self):
         """Cancels the job and deletes the job hash from Redis."""
         self.cancel()
-        connection = pipeline if pipeline is not None else self.connection
-        connection.delete(self.key)
-        connection.delete(self.dependents_key)
+        self.connection.delete(self.key)
+        self.connection.delete(self.dependents_key)
 
     # Job execution
     def perform(self):  # noqa
@@ -530,7 +527,7 @@ class Job(object):
 
         return '{0}({1})'.format(self.func_name, args)
 
-    def cleanup(self, ttl=None, pipeline=None):
+    def cleanup(self, ttl=None):
         """Prepare job for eventual deletion (if needed). This method is usually
         called after successful execution. How long we persist the job and its
         result depends on the value of ttl:
@@ -544,10 +541,9 @@ class Job(object):
         elif not ttl:
             return
         elif ttl > 0:
-            connection = pipeline if pipeline is not None else self.connection
-            connection.expire(self.key, ttl)
+            self.connection.expire(self.key, ttl)
 
-    def register_dependency(self, pipeline=None):
+    def register_dependency(self):
         """Jobs may have dependencies. Jobs are enqueued only if the job they
         depend on is successfully performed. We record this relation as
         a reverse dependency (a Redis set), with a key that looks something
@@ -561,10 +557,9 @@ class Job(object):
         from .registry import DeferredJobRegistry
 
         registry = DeferredJobRegistry(self.origin, connection=self.connection)
-        registry.add(self, pipeline=pipeline)
+        registry.add(self)
 
-        connection = pipeline if pipeline is not None else self.connection
-        connection.sadd(Job.dependents_key_for(self._dependency_id), self.id)
+        self.connection.sadd(Job.dependents_key_for(self._dependency_id), self.id)
 
     def __str__(self):
         return '<Job {0}: {1}>'.format(self.id, self.description)

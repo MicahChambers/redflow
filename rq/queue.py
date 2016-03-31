@@ -23,6 +23,7 @@ def get_failed_queue(connection=None):
 def compact(lst):
     return [item for item in lst if item is not None]
 
+# smembers
 
 @total_ordering
 class Queue(object):
@@ -40,6 +41,7 @@ class Queue(object):
         def to_queue(queue_key):
             return cls.from_queue_key(as_text(queue_key),
                                       connection=connection)
+
         return [to_queue(rq_key) for rq_key in connection.smembers(cls.redis_queues_keys) if rq_key]
 
     @classmethod
@@ -141,14 +143,11 @@ class Queue(object):
         """Returns a count of all messages in the queue."""
         return self.connection.llen(self.key)
 
-    def remove(self, job_or_id, pipeline=None):
+    def remove(self, job_or_id):
         """Removes Job from queue, accepts either a Job instance or ID."""
         job_id = job_or_id.id if isinstance(job_or_id, self.job_class) else job_or_id
 
-        if pipeline is not None:
-            pipeline.lrem(self.key, 1, job_id)
-
-        return self.connection._lrem(self.key, 1, job_id)
+        return self.connection.lrem(self.key, 1, job_id)
 
     def compact(self):
         """Removes all "dead" jobs from the queue by cycling through it, while
@@ -164,10 +163,9 @@ class Queue(object):
             if self.job_class.exists(job_id, self.connection):
                 self.connection.rpush(self.key, job_id)
 
-    def push_job_id(self, job_id, pipeline=None, at_front=False):
+    def push_job_id(self, job_id, at_front=False):
         """Pushes a job ID on the corresponding Redis queue.
         'at_front' allows you to push the job onto the front instead of the back of the queue"""
-        connection = pipeline if pipeline is not None else self.connection
         if at_front:
             connection.lpush(self.key, job_id)
         else:
@@ -198,7 +196,7 @@ class Queue(object):
         if depends_on is not None:
             if not isinstance(depends_on, self.job_class):
                 depends_on = Job(id=depends_on, connection=self.connection)
-            with self.connection._pipeline() as pipe:
+            with self.connection.transaction() as pipe:
                 while True:
                     try:
                         pipe.watch(depends_on.key)

@@ -18,8 +18,6 @@ def fix_return_type(func):
     return _inner
 
 
-PATCHED_METHODS = ['_setex', '_lrem', '_zadd', '_pipeline', '_ttl']
-
 
 def _hset(self, key, field_name, value, pipeline=None):
     connection = pipeline if pipeline is not None else self
