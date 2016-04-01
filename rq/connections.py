@@ -54,7 +54,7 @@ class Connection(object):
         else:
             return getattr(self._redis_connection, attr_name)
 
-r   def __enter__(self):
+    def __enter__(self):
         push_connection(self)
 
     def __exit__(self, type, value, traceback):
