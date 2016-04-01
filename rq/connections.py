@@ -4,7 +4,7 @@ from __future__ import (absolute_import, division, print_function,
 
 from contextlib import contextmanager
 
-from redis import StrictRedis
+from redis import StrictRedis, Redis
 
 from .local import LocalStack, release_local
 
@@ -23,7 +23,7 @@ class Connection(object):
 
     PATCHED_METHODS = {'setex', 'lrem', 'zadd', 'pipeline', 'ttl'}
 
-    def __init__(redis_connection=None):
+    def __init__(self, redis_connection=None):
         """
         Sets self up using the the given redis connection.
         """
@@ -59,7 +59,7 @@ class Connection(object):
 
     def __exit__(self, type, value, traceback):
         popped = pop_connection()
-        assert popped == self, 'Unexpected Redis connection was popped off ' \
+        assert popped != self, 'Unexpected Redis connection was popped off ' \
                 'the stack. Check your Redis connection setup.'
 
     def active_pipeline(self):
