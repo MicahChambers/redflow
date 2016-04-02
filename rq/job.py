@@ -9,7 +9,6 @@ from uuid import uuid4
 
 from rq.compat import as_text, decode_redis_hash, string_types, text_type
 
-from .connections import resolve_connection
 from .exceptions import NoSuchJobError, UnpickleError
 from .local import LocalStack
 from .utils import enum, import_attribute, utcformat, utcnow, utcparse
@@ -54,96 +53,34 @@ def unpickle(pickled_string):
     return obj
 
 
-def cancel_job(job_id, connection=None):
-    """Cancels the job with the given job ID, preventing execution.  Discards
-    any job info (i.e. it can't be requeued later).
-    """
-    Job(job_id, connection=connection).cancel()
+#def get_current_job(connection=None):
+#    """Returns the Job instance that is currently being executed.  If this
+#    function is invoked from outside a job context, None is returned.
+#    """
+#    job_id = _job_stack.top
+#    if job_id is None:
+#        return None
+#    return Job.fetch(job_id, connection=connection)
 
 
-def requeue_job(job_id, connection=None):
-    """Requeues the job with the given job ID.  If no such job exists, just
-    remove the job ID from the failed queue, otherwise the job ID should refer
-    to a failed job (i.e. it should be on the failed queue).
-    """
-    from .queue import get_failed_queue
-    fq = get_failed_queue(connection=connection)
-    fq.requeue(job_id)
+def key_for_job(job_id):
+    """The Redis key that is used to store job hash under."""
+    return b'rq:job:' + job_id.encode('utf-8')
 
 
-def get_current_job(connection=None):
-    """Returns the Job instance that is currently being executed.  If this
-    function is invoked from outside a job context, None is returned.
-    """
-    job_id = _job_stack.top
-    if job_id is None:
-        return None
-    return Job.fetch(job_id, connection=connection)
+def dependents_key_for_job(job_id):
+    """The Redis key that is used to store job dependents hash under."""
+    return 'rq:job:{0}:dependents'.format(job_id)
+
+
+def dependencies_key_for_job(job_id):
+    """The Redis key that is used to store job dependencies hash under."""
+    return 'rq:job:{0}:dependencies'.format(job_id)
 
 
 class Job(object):
     """A Job is just a convenient datastructure to pass around job (meta) data.
     """
-
-    # Job construction
-    @classmethod
-    def create(cls, func, args=None, kwargs=None, connection=None,
-               result_ttl=None, ttl=None, status=None, description=None,
-               depends_on=None, timeout=None, id=None, origin=None, meta=None):
-        """Creates a new Job instance for the given function, arguments, and
-        keyword arguments.
-        """
-        if args is None:
-            args = ()
-        if kwargs is None:
-            kwargs = {}
-
-        if not isinstance(args, (tuple, list)):
-            raise TypeError('{0!r} is not a valid args list'.format(args))
-        if not isinstance(kwargs, dict):
-            raise TypeError('{0!r} is not a valid kwargs dict'.format(kwargs))
-
-        job = cls(connection=connection)
-        if id is not None:
-            job.set_id(id)
-
-        if origin is not None:
-            job.origin = origin
-
-        # Set the core job tuple properties
-        job._instance = None
-        if inspect.ismethod(func):
-            job._instance = func.__self__
-            job._func_name = func.__name__
-        elif inspect.isfunction(func) or inspect.isbuiltin(func):
-            job._func_name = '{0}.{1}'.format(func.__module__, func.__name__)
-        elif isinstance(func, string_types):
-            job._func_name = as_text(func)
-        elif not inspect.isclass(func) and hasattr(func, '__call__'):  # a callable class instance
-            job._instance = func
-            job._func_name = '__call__'
-        else:
-            raise TypeError('Expected a callable or a string, but got: {}'.format(func))
-        job._args = args
-        job._kwargs = kwargs
-
-        # Extra meta data
-        job.description = description or job.get_call_string()
-        job.result_ttl = result_ttl
-        job.ttl = ttl
-        job.timeout = timeout
-        job._status = status
-        job.meta = meta or {}
-
-        # dependencies could be a single job or a list of jobs
-        if depends_on:
-            if isinstance(depends_on, list):
-                job._dependency_ids = [tmp.id for tmp in depends_on]
-            else:
-                job._dependency_ids = ([depends_on.id]
-                    if isinstance(depends_on, Job) else [depends_on])
-
-        return job
 
     def get_status(self):
         self._status = as_text(self.connection.hget(self.key, 'status'))
@@ -305,23 +242,12 @@ class Job(object):
         self._kwargs = value
         self._data = UNEVALUATED
 
-    @classmethod
-    def exists(cls, job_id, connection=None):
-        """Returns whether a job hash exists for the given job ID."""
-        conn = resolve_connection(connection)
-        return conn.exists(cls.key_for(job_id))
-
-    @classmethod
-    def fetch(cls, id, connection=None):
-        """Fetches a persisted job from its corresponding Redis key and
-        instantiates it.
-        """
-        job = cls(id, connection=connection)
-        job.refresh()
-        return job
-
     def __init__(self, id=None, connection=None):
-        self.connection = resolve_connection(connection)
+        if isinstance(connection, RQConnection):
+            self.connection = connection
+        else:
+            self.connection = RQConnection(connection)
+
         self._id = id
         self.created_at = utcnow()
         self._data = UNEVALUATED
@@ -363,35 +289,20 @@ class Job(object):
 
     id = property(get_id, set_id)
 
-    @classmethod
-    def key_for(cls, job_id):
-        """The Redis key that is used to store job hash under."""
-        return b'rq:job:' + job_id.encode('utf-8')
-
-    @classmethod
-    def dependents_key_for(cls, job_id):
-        """The Redis key that is used to store job dependents hash under."""
-        return 'rq:job:{0}:dependents'.format(job_id)
-
-    @classmethod
-    def dependencies_key_for(cls, job_id):
-        """The Redis key that is used to store job dependencies hash under."""
-        return 'rq:job:{0}:dependencies'.format(job_id)
-
     @property
     def key(self):
         """The Redis key that is used to store job hash under."""
-        return self.key_for(self.id)
+        return key_for(self.id)
 
     @property
     def dependents_key(self):
         """The Redis key that is used to store job dependents hash under."""
-        return self.dependents_key_for(self.id)
+        return dependents_key_for_job(self.id)
 
     @property
     def dependencies_key(self):
         """The Redis key that is used to store job dependancies hash under."""
-        return self.dependencies_key_for(self.id)
+        return dependencies_key_for_job(self.id)
 
     @property
     def result(self):
@@ -600,11 +511,11 @@ class Job(object):
         registry.add(self, pipeline=pipeline)
 
         connection = pipeline if pipeline is not None else self.connection
-        connection.sadd(Job.dependencies_key_for(self.id),
+        connection.sadd(dependencies_key_for_job(self.id),
             *[dependency.id for dependency in dependencies])
 
         for dependency in dependencies:
-            connection.sadd(Job.dependents_key_for(dependency.id), self.id)
+            connection.sadd(dependents_key_for_job(dependency.id), self.id)
 
     def __str__(self):
         return '<Job {0}: {1}>'.format(self.id, self.description)
