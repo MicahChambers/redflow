@@ -1,3 +1,11 @@
+Modifications from default
+=============================
+Removed all explicit use of pipelines. Anything that needs to an atomic set of
+operations has been turned into a helper function.
+
+Original Documentation
+=============================
+
 RQ (_Redis Queue_) is a simple Python library for queueing jobs and processing
 them in the background with workers.  It is backed by Redis and it is designed
 to have a low barrier to entry.  It should be integrated in your web stack
