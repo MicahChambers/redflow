@@ -9,9 +9,11 @@ from uuid import uuid4
 
 from rq.compat import as_text, decode_redis_hash, string_types, text_type
 
-from .exceptions import NoSuchJobError, UnpickleError
-from .local import LocalStack
-from .utils import enum, import_attribute, utcformat, utcnow, utcparse
+from rq.exceptions import NoSuchJobError, UnpickleError
+from rq.local import LocalStack
+from rq.utils import enum, import_attribute, utcformat, utcnow, utcparse
+from rq.keys import (key_for_job, dependents_key_for_job,
+                     dependencies_key_for_job)
 
 try:
     import cPickle as pickle
@@ -53,37 +55,12 @@ def unpickle(pickled_string):
     return obj
 
 
-#def get_current_job(connection=None):
-#    """Returns the Job instance that is currently being executed.  If this
-#    function is invoked from outside a job context, None is returned.
-#    """
-#    job_id = _job_stack.top
-#    if job_id is None:
-#        return None
-#    return Job.fetch(job_id, connection=connection)
-
-
-def key_for_job(job_id):
-    """The Redis key that is used to store job hash under."""
-    return b'rq:job:' + job_id.encode('utf-8')
-
-
-def dependents_key_for_job(job_id):
-    """The Redis key that is used to store job dependents hash under."""
-    return 'rq:job:{0}:dependents'.format(job_id)
-
-
-def dependencies_key_for_job(job_id):
-    """The Redis key that is used to store job dependencies hash under."""
-    return 'rq:job:{0}:dependencies'.format(job_id)
-
-
 class Job(object):
     """A Job is just a convenient datastructure to pass around job (meta) data.
     """
 
     def get_status(self):
-        self._status = as_text(self.connection.hget(self.key, 'status'))
+        self._status = as_text(self.connection._hget(self.key, 'status'))
         return self._status
 
     def _get_status(self):
@@ -95,7 +72,7 @@ class Job(object):
 
     def set_status(self, status, pipeline=None):
         self._status = status
-        self.connection._hset(self.key, 'status', self._status, pipeline)
+        self.connection._hset(self.key, 'status', self._status)
 
     def _set_status(self, status):
         warnings.warn(
@@ -124,38 +101,42 @@ class Job(object):
 
     @property
     def dependencies(self):
-        """Returns a list of job's dependencies. To avoid repeated
-	   Redis fetches, we cache job.dependencies
+        """
+        Returns a list of job's dependencies. To avoid repeated
+        Redis fetches, we cache job.dependencies
         """
         if self._dependency_ids is None:
             return None
         if hasattr(self, '_dependencies'):
             return self._dependencies
-        self._dependencies = [Job.fetch(
-            dependency_id, connection=self.connection)
-            for dependency_id in self._dependency_ids]
+        self._dependencies = [
+            self.connection.get_job(dependency_id)
+            for dependency_id in self._dependency_ids
+        ]
 
-        for job in self._dependencies:
-            job.refresh()
         return self._dependencies
 
     def remove_dependency(self, dependency_id):
-        """Removes a dependency from job. This is usually called when
-        dependency is successfully executed."""
-        # TODO: can probably be pipelined
-        self.connection.srem(self.dependencies_key, dependency_id)
+        """
+        Removes a dependency from job. This is usually called when
+        dependency is successfully executed.
+        """
+        self.connection._srem(self.dependencies_key, dependency_id)
 
     def has_unmet_dependencies(self):
-        """Checks whether job has dependencies that aren't yet finished."""
-        return bool(self.connection.scard(self.dependencies_key))
+        """
+        Checks whether job has dependencies that aren't yet finished.
+        """
+        return bool(self.connection._scard(self.dependencies_key))
 
     @property
     def dependents(self):
-        """Returns a list of jobs whose execution depends on this
-        job's successful execution"""
-        dependents_ids = self.connection.smembers(self.dependents_key)
-        return [Job.fetch(id, connection=self.connection)
-                for id in dependents_ids]
+        """
+        Returns a list of jobs whose execution depends on this
+        job's successful execution
+        """
+        dependents_ids = self.connection._smembers(self.dependents_key)
+        return [self.connection.get_job(id) for id in dependents_ids]
 
     @property
     def func(self):
@@ -306,7 +287,8 @@ class Job(object):
 
     @property
     def result(self):
-        """Returns the return value of the job.
+        """
+        Returns the return value of the job.
 
         Initially, right after enqueueing a job, the return value will be
         None.  But when the job has been executed, and had a return value or
@@ -322,7 +304,7 @@ class Job(object):
         seconds by default).
         """
         if self._result is None:
-            rv = self.connection.hget(self.key, 'result')
+            rv = self.connection._hget(self.key, 'result')
             if rv is not None:
                 # cache the result
                 self._result = loads(rv)
@@ -331,15 +313,77 @@ class Job(object):
     """Backwards-compatibility accessor property `return_value`."""
     return_value = result
 
+    def create(self, func, args=None, kwargs=None, result_ttl=None,
+                ttl=None, status=None, description=None, depends_on=None,
+                timeout=None, id=None, origin=None, meta=None):
+        """
+        Actually fills in parameters. Similar to refresh, but instead of pulling
+        remote properties sets new propertys. Note that the result is not saved,
+        so if you want the updated job to persist you must call:
+
+            >>> job.create(...)
+            >>> job.save()
+        """
+        if args is None:
+            args = ()
+        if kwargs is None:
+            kwargs = {}
+
+        if not isinstance(args, (tuple, list)):
+            raise TypeError('{0!r} is not a valid args list'.format(args))
+        if not isinstance(kwargs, dict):
+            raise TypeError('{0!r} is not a valid kwargs dict'.format(kwargs))
+
+        if id is not None:
+            self.set_id(id)
+
+        if origin is not None:
+            self.origin = origin
+
+        # Set the core job tuple properties
+        self._instance = None
+        if inspect.ismethod(func):
+            self._instance = func.__self__
+            self._func_name = func.__name__
+        elif inspect.isfunction(func) or inspect.isbuiltin(func):
+            self._func_name = '{0}.{1}'.format(func.__module__, func.__name__)
+        elif isinstance(func, string_types):
+            self._func_name = as_text(func)
+        elif not inspect.isclass(func) and hasattr(func, '__call__'):  # a callable class instance
+            self._instance = func
+            self._func_name = '__call__'
+        else:
+            raise TypeError('Expected a callable or a string, but got: {}'.format(func))
+        self._args = args
+        self._kwargs = kwargs
+
+        # Extra meta data
+        self.description = description or self.get_call_string()
+        self.result_ttl = result_ttl
+        self.ttl = ttl
+        self.timeout = timeout
+        self._status = status
+        self.meta = meta or {}
+
+        # dependencies could be a single job or a list of jobs
+        if depends_on:
+            if isinstance(depends_on, list):
+                self._dependency_ids = [tmp.id for tmp in depends_on]
+            elif isinstance(depends_on, Job):
+                self._dependency_ids = [depends_on.id]
+            else:
+                self._dependency_ids = [depends_on]
+
     # Persistence
     def refresh(self):  # noqa
-        """Overwrite the current instance's properties with the values in the
+        """
+        Overwrite the current instance's properties with the values in the
         corresponding Redis key.
 
         Will raise a NoSuchJobError if no corresponding Redis key exists.
         """
         key = self.key
-        obj = decode_redis_hash(self.connection.hgetall(key))
+        obj = decode_redis_hash(self.connection._hgetall(key))
         if len(obj) == 0:
             raise NoSuchJobError('No such job: {0}'.format(key))
 
@@ -404,13 +448,12 @@ class Job(object):
 
         return obj
 
-    def save(self, pipeline=None):
+    def save(self):
         """Persists the current job instance to its corresponding Redis key."""
         key = self.key
-        connection = pipeline if pipeline is not None else self.connection
 
-        connection.hmset(key, self.to_dict())
-        self.cleanup(self.ttl, pipeline=connection)
+        self.connection._hmset(key, self.to_dict())
+        self.cleanup(self.ttl)
 
     def cancel(self):
         """Cancels the given job, which will prevent the job from ever being
@@ -420,30 +463,24 @@ class Job(object):
         without worrying about the internals required to implement job
         cancellation.
         """
-        from .queue import Queue
-        pipeline = self.connection._pipeline()
-        if self.origin:
-            queue = Queue(name=self.origin, connection=self.connection)
-            queue.remove(self, pipeline=pipeline)
-        pipeline.execute()
+        from rq.queue import Queue
+        with self.connection.pipeline():
+            if self.origin:
+                queue = Queue(name=self.origin, connection=self.connection)
+                queue.remove(self)
 
-    def delete(self, pipeline=None):
+    def delete(self):
         """Cancels the job and deletes the job hash from Redis."""
         self.cancel()
-        connection = pipeline if pipeline is not None else self.connection
-        connection.delete(self.key)
-        connection.delete(self.dependents_key)
+        connection._delete(self.key)
+        connection._delete(self.dependents_key)
 
     # Job execution
     def perform(self):  # noqa
         """Invokes the job function with the job arguments."""
-        self.connection.persist(self.key)
+        self.connection._persist(self.key)
         self.ttl = -1
-        _job_stack.push(self.id)
-        try:
-            self._result = self.func(*self.args, **self.kwargs)
-        finally:
-            assert self.id == _job_stack.pop()
+        self._result = self.func(*self.args, **self.kwargs)
         return self._result
 
     def get_ttl(self, default_ttl=None):
@@ -477,7 +514,7 @@ class Job(object):
 
         return '{0}({1})'.format(self.func_name, args)
 
-    def cleanup(self, ttl=None, pipeline=None):
+    def cleanup(self, ttl=None):
         """Prepare job for eventual deletion (if needed). This method is usually
         called after successful execution. How long we persist the job and its
         result depends on the value of ttl:
@@ -491,10 +528,9 @@ class Job(object):
         elif not ttl:
             return
         elif ttl > 0:
-            connection = pipeline if pipeline is not None else self.connection
-            connection.expire(self.key, ttl)
+            self.connection._expire(self.key, ttl)
 
-    def register_dependencies(self, dependencies, pipeline=None):
+    def register_dependencies(self, dependencies):
         """Jobs may have dependencies. Jobs are enqueued only if the job they
         depend on is successfully performed. We record this relation as
         a reverse dependency (a Redis set), with a key that looks something
@@ -508,14 +544,13 @@ class Job(object):
         from .registry import DeferredJobRegistry
 
         registry = DeferredJobRegistry(self.origin, connection=self.connection)
-        registry.add(self, pipeline=pipeline)
+        registry.add(self)
 
-        connection = pipeline if pipeline is not None else self.connection
-        connection.sadd(dependencies_key_for_job(self.id),
+        self.connection._sadd(dependencies_key_for_job(self.id),
             *[dependency.id for dependency in dependencies])
 
         for dependency in dependencies:
-            connection.sadd(dependents_key_for_job(dependency.id), self.id)
+            self.connection._sadd(dependents_key_for_job(dependency.id), self.id)
 
     def __str__(self):
         return '<Job {0}: {1}>'.format(self.id, self.description)
@@ -527,4 +562,121 @@ class Job(object):
     def __hash__(self):
         return hash(self.id)
 
-_job_stack = LocalStack()
+    def _attempt_enqueue(self):
+        """
+        Atomically attempt to change job status from DEFERRED to QUEUED.
+        Unfortunately this is a pretty magical function.
+
+        The following atomic check/modifications are done:
+
+            - check reverse dependencies for each of the jobs that job_id is
+              waiting for to determine whether they are all finished
+            - If all the jobs are finished and the job was deferred
+                - change status to queued
+                - Queue the job in the origin queue
+                - Set the enqueued_at time for the job
+            - If jobs remain
+                - ensure all the parents (reverse-dependencies) know to check it
+                  when they finish
+            - If the job isn't deferred (someone else already executed this) do
+              nothing
+
+        This assumes all the jobs have already been created. Why do so much in
+        this one function? Since these calls are all done atomically, it should
+        be impossible to "drop" a job even if we die midstream. If the movement
+        between queues were done elsewhere we would be in a half-queued state.
+        Since handles *all of the changes* during an enqueuing process we can be
+        sure that we are moving from valid state to valid state
+
+        :return previous_status, new_status
+        """
+        from .registry import DeferredJobRegistry
+
+        FINISHED = JobStatus.FINISHED
+        assert self.origin is not None
+        assert self._dependency_ids is not None
+        assert self._id is not None
+
+        with self._connection._pipeline() as pipe:
+            while True:
+                try:
+                    # Watch all the jobs (including the central job)
+                    pipe.watch(*[key_for_job(id)
+                                 for id in [self.id] + self._dependency_ids])
+
+                    # Prepare outputs of previous, final status
+                    prev_status = pipe.hget(key_for_job(self.id), 'status')
+                    new_status = prev_status
+
+                    # Make sure that the job is still deferred (that it wasn't
+                    # already enqueued by someone else)
+                    if prev_status != JobStatus.DEFERRED:
+                        return prev_status, new_status
+
+                    # Find dependencies
+                    remaining_dependencies = []
+                    for dep_id in self._dependency_ids:
+                        if pipe.hget(key_for_job(dep_id), 'status') != FINISHED:
+                            remaining_dependencies.append(dep_id)
+
+                    pipe.multi()
+                    if remaining_dependencies:
+                        # Add job_id to the set of jobs to watch by parents
+                        for dep_id in remaining_dependencies:
+                            pipe.sadd(key_for_dependents(dep_id), self.id)
+                    else:
+                        enqueued_at = utcnow()
+                        new_status = JobStatus.QUEUED
+
+                        # Job is ready to be queued, update job state
+                        pipe.hset(key_for_job(self.id), 'status', new_status)
+                        pipe.hset(key_for_job(self.id), 'enqueued_at', enqueued_at)
+
+                        # enqueue
+                        pipe.rpush(queue_name_to_key(self.origin), self.id)
+
+                    pipe.execute()
+                    break
+                except WatchError:
+                    continue
+
+        # The deferred job registry is not definitive so we don't need
+        # pipelines to modify it
+        if new_status == JobStatus.DEFERRED:
+            reg = DeferredJobRegistry(self.origin, connection=self._connection)
+            reg.add(job)
+        elif prev_status == JobStatus.DEFERRED and new_status == JobStatus.QUEUED:
+            def_reg = DeferredJobRegistry(self.origin, connection=self._connection)
+            def_reg.remove(job)
+
+            # Update self
+            self.enqueued_at = enqueued_at
+            self.status = new_status
+
+        return prev_status, new_status
+
+    def enqueue_dependents(self):
+        """
+        Try to enqueue all of the jobs dependents
+        """
+        for child_id in self._dependency_ids:
+            child = Job(child_id, connection=self.connection)
+            child.refresh()
+
+            prev_status, new_status = child._try_enqueue_job()
+
+        while True:
+            registry = DeferredJobRegistry(dependent.origin, self._connection)
+
+            with self._connection._pipeline() as pipeline:
+                registry.remove(dependent, pipeline=pipeline)
+                dependent.remove_dependency(job.id)
+                if not dependent.has_unmet_dependencies():
+                    if dependent.origin == self.name:
+                        self.enqueue_job(dependent, pipeline=pipeline)
+                    else:
+                        queue = Queue(name=dependent.origin,
+                                      connection=self._connection)
+                        queue.enqueue_job(dependent, pipeline=pipeline)
+                pipeline.execute()
+

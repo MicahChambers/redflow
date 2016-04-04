@@ -1,7 +1,15 @@
-Modifications from default
+RQPrime
 =============================
+This is a derivative of RQ (Redis Queue) that is a major refactor of the
+original RQ library. It aims to match the simplicity of the original library,
+but add better Redis pipeline options for arguments and thus also limit some of
+the race conditions that were never solved by RQ.
+
 Removed all explicit use of pipelines. Anything that needs to an atomic set of
 operations has been turned into a helper function.
+
+Changes
+queue.Queue.redis_queues_keys -> queue.REDIS_QUEUES_KEY
 
 Original Documentation
 =============================

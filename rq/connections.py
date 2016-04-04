@@ -7,8 +7,10 @@ from contextlib import contextmanager
 from redis import StrictRedis
 from redis import Pipeline
 
-from .compat.connections import patch_connection
-from .local import LocalStack, release_local
+from rq.compat import as_text
+from rq.exceptions import DequeueTimeout
+from rq.compat.connections import patch_connection
+from rq.local import LocalStack, release_local
 
 
 class NoRedisConnectionException(Exception):
@@ -26,89 +28,53 @@ def RQConnection(object):
         >>>     q2 = conn.queue("my-queue2")
         >>>     job3 = q2.enqueue_job(gar, hello='world', depeneds_on=[job1, job2])
     """
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, type, value, tb):
-        # We shouldn't be leaving any pipes open
-        assert self._active_pipe is None
-
     def __init__(self, conn):
-        self._active_pipe = None
-
         if conn is None:
             self._redis_conn = StrictRedis()
+            self._using_strict_redis = True
         elif isinstance(conn, Redis) or isinstance(conn, Pipeline):
             raise Exception("Redis and Pipeline are not supported, use "
                             "StrictRedis and StrictPipeline")
-        elif isinstance(conn, StrictRedis) or isinstance(conn, StrictPipeline):
+        elif isinstance(conn, StrictRedis):
+            self._using_strict_redis = True
             self._redis_conn = conn
         else:
             raise Exception("Unknown connection type provided")
 
-    @property
-    def redis_connection(self):
-        if self._active_pipe:
-            return self._active_pipe
+    def get_queue(self, name=None, default_timeout=None, async=True,
+                  job_class=None):
+        """
+        Get a queue object. Note that this doesn't actually hit the redis
+        backend and using the queue will implicity create it.
+        """
+        # TODO maybe sync configs from keys? Configs might not be stored in
+        # redis though
+        if name is None:
+            return Queue(default_timeout=default_timeout, async=async,
+                         job_class=job_class, connection=self)
         else:
-            return self._redis_conn
-
-    def get_queue(self, name=None):
-        """
-        Get a queue object
-        """
-        return Queue(self)
+            return Queue(name=name, default_timeout=default_timeout,
+                         async=async, job_class=job_class, connection=self)
 
     def get_queues(self):
         """
         Returns an iterable of all Queues.
         """
-        def to_queue(queue_key):
-            return cls.from_queue_key(as_text(queue_key),
-                                      connection=connection)
-        return [to_queue(rq_key) for rq_key in connection.smembers(cls.redis_queues_keys) if rq_key]
+        from rq.queue import queue_key_to_name
+        from rq.queue import REDIS_QUEUES_KEYS
+        lst = []
+        for rq_key in _redis_conn.smembers(REDIS_QUEUES_KEYS):
+            if rq_key:  # TODO does this ever evaluate to False?
+                q = get_queue(queue_key_to_name(rq_key))
+                lst.append[q]
+        return lst
 
-    def dequeue_any(self, queues, timeout):
+    def get_job(self, job_id):
         """
-        Class method returning the job_class instance at the front of the given
-        set of Queues, where the order of the queues is important.
-
-        When all of the Queues are empty, depending on the `timeout` argument,
-        either blocks execution of this function for the duration of the
-        timeout or until new messages arrive on any of the queues, or returns
-        None.
-
-        See the documentation of cls.lpop for the interpretation of timeout.
-        """
-        while True:
-            queue_keys = [q.key for q in queues]
-            result = cls.lpop(queue_keys, timeout, connection=connection)
-            if result is None:
-                return None
-            queue_key, job_id = map(as_text, result)
-            queue = cls.from_queue_key(queue_key, connection=connection)
-            try:
-                job = cls.job_class.fetch(job_id, connection=connection)
-            except NoSuchJobError:
-                # Silently pass on jobs that don't exist (anymore),
-                # and continue in the look
-                continue
-            except UnpickleError as e:
-                # Attach queue information on the exception for improved error
-                # reporting
-                e.job_id = job_id
-                e.queue = queue
-                raise e
-            return job, queue
-        return None, None
-
-
-    def get_job(self, job_id, connection=None):
-        """Fetches a persisted job from its corresponding Redis key and
+        Fetches a persisted job from its corresponding Redis key and
         instantiates it.
         """
-        job = Job(job_id, connection=connection)
+        job = Job(job_id, connection=self)
         try:
             job.refresh()
         except NoSuchJobError:
@@ -119,79 +85,139 @@ def RQConnection(object):
         """Cancels the job with the given job ID, preventing execution.  Discards
         any job info (i.e. it can't be requeued later).
         """
-        Job(job_id, connection=connection).cancel()
+        Job(job_id, connection=self).cancel()
 
     def requeue_job(self, job_id):
         """Requeues the job with the given job ID.  If no such job exists, just
         remove the job ID from the failed queue, otherwise the job ID should refer
         to a failed job (i.e. it should be on the failed queue).
         """
-        from .queue import get_failed_queue
-        fq = get_failed_queue(connection=connection)
+        fq = self.get_failed_queue()
         fq.requeue(job_id)
-
-    # Job construction
-    def _create_job(self, func, args=None, kwargs=None, result_ttl=None,
-                    ttl=None, status=None, description=None, depends_on=None,
-                    timeout=None, id=None, origin=None, meta=None):
-        """Creates a new Job instance for the given function, arguments, and
-        keyword arguments.
-        """
-        if args is None:
-            args = ()
-        if kwargs is None:
-            kwargs = {}
-
-        if not isinstance(args, (tuple, list)):
-            raise TypeError('{0!r} is not a valid args list'.format(args))
-        if not isinstance(kwargs, dict):
-            raise TypeError('{0!r} is not a valid kwargs dict'.format(kwargs))
-
-        job = Job(connection=connection)
-        if id is not None:
-            job.set_id(id)
-
-        if origin is not None:
-            job.origin = origin
-
-        # Set the core job tuple properties
-        job._instance = None
-        if inspect.ismethod(func):
-            job._instance = func.__self__
-            job._func_name = func.__name__
-        elif inspect.isfunction(func) or inspect.isbuiltin(func):
-            job._func_name = '{0}.{1}'.format(func.__module__, func.__name__)
-        elif isinstance(func, string_types):
-            job._func_name = as_text(func)
-        elif not inspect.isclass(func) and hasattr(func, '__call__'):  # a callable class instance
-            job._instance = func
-            job._func_name = '__call__'
-        else:
-            raise TypeError('Expected a callable or a string, but got: {}'.format(func))
-        job._args = args
-        job._kwargs = kwargs
-
-        # Extra meta data
-        job.description = description or job.get_call_string()
-        job.result_ttl = result_ttl
-        job.ttl = ttl
-        job.timeout = timeout
-        job._status = status
-        job.meta = meta or {}
-
-        # dependencies could be a single job or a list of jobs
-        if depends_on:
-            if isinstance(depends_on, list):
-                job._dependency_ids = [tmp.id for tmp in depends_on]
-            else:
-                job._dependency_ids = ([depends_on.id]
-                    if isinstance(depends_on, Job) else [depends_on])
-
-        return job
 
     def get_failed_queue(self):
         """Returns a handle to the special failed queue."""
-        return FailedQueue(connection=self.connection)
+        return FailedQueue(connection=self)
+
+    def dequeue_any(self, queues, timeout):
+        """
+        Returns job_class instance at the front of the given set of Queues,
+        where the order of the queues is important.
+
+        When all of the Queues are empty, depending on the `timeout` argument,
+        either blocks execution of this function for the duration of the
+        timeout or until new messages arrive on any of the queues, or returns
+        None.
+
+        See the documentation of cls.lpop for the interpretation of timeout.
+        """
+        from rq.queue import Queue
+        from rq.queue import queue_name_to_key
+        from rq.queue import queue_key_to_name
+
+        # Resolve queue keys
+        queue_keys = []
+        for q in queues:
+            if isinstance(q, basestring):
+                queue_keys.append(queue_name_to_key(q))
+            elif isinstance(q, Queue):
+                queue_keys.append(q.key)
+
+        while True:
+            result = self._lpop(queue_keys, timeout, connection=connection)
+            if result is None:
+                return None
+
+            # Convert queue key and job id back into Queue and Job objects
+            try:
+                job = Job(job_id, connection=self)
+                job.refresh()
+            except NoSuchJobError:
+                # Silently pass on jobs that don't exist (anymore),
+                # and continue in the look
+                continue
+            except UnpickleError as e:
+                # Attach queue information on the exception for improved error
+                # reporting
+                e.job_id = job_id
+                e.queue = queue
+                raise e
+
+            queue_key, job_id = map(as_text, result)
+            queue = Queue(queue_key_to_name(queue_key), connection=self)
+
+            return job, queue
+        return None, None
+
+    ##
+    # Wrappers around needed redis functions to ensure consistent interface,
+    # and so pipelines can be used transparently
+    ##
+    def _lpop(self, queue_keys, timeout):
+        """
+        Helper method. Intermediate method to abstract away from some
+        Redis API details.
+
+        If timeout is not None then the blocking version of lpop (blpop) is
+        used, otherwise this will return None if all the queues are empty.
+
+        The issue:
+            LPOP (the non-blocking variant) accepts only a single key
+            BLPOP accepts multiple but has to have a timeout >= 1 (0 blocks
+                   forever)
+
+        To get non-blocking LPOP, we need to iterate over all queues, do
+        individual LPOPs, and return the result. Until Redis receives a specific
+        method for this, we'll have to wrap it this way.
+
+        :param list queue_keys: List of keys for redis lists to pope out of.
+        :param int timeout:
+            None - non-blocking (return immediately)
+             > 0 - maximum number of seconds to block
+        """
+        if timeout is not None:  # blocking variant
+            if timeout == 0:
+                raise ValueError('RQ does not support indefinite timeouts. '
+                                 'Please pick a timeout value > 0')
+            result = _redis_conn.blpop(queue_keys, timeout)
+            if result is None:
+                raise DequeueTimeout(timeout, queue_keys)
+            queue_key, job_id = result
+            return queue_key, job_id
+        else:  # non-blocking variant
+            for queue_key in queue_keys:
+                blob = _redis_conn.lpop(queue_key)
+                if blob is not None:
+                    return queue_key, blob
+            return None
+
+    def _setex(self, name, value, time):
+        return self._redis_conn(name=name, value=value, time=time)
+
+    def _lrem(self, name, count, value):
+        if self._using_strict_redis:
+            return self._redis_conn(name=name, count=count, value=value)
+        else:
+            return self._redis_conn(name=name, num=count, value=value)
+
+    def _zadd(self, name, *args, **kwargs):
+        """
+        Intermediate for
+        """
+        if self._using_strict_redis:
+            # The redis connection is struct
+            return self._redis_conn(name, *args, **kwargs)
+        else:
+            # swap order so that order is correct for non-strict redis conn
+            swapped_args = [name, score for score, name in args]
+            return self._redis_conn(name, *swapped_args, **kwargs)
+
+    def __getattr__(self, attr_name, defvalue):
+        """
+        Passes through unmodified redis functions if possible
+        """
+        if attr_name.startswith('_') and hasattr(self._redis_conn, attr_name[1:]):
+            return getattr(self._redis_conn, attr_name[1:])
 
 __all__ = ['Connection']
 
