@@ -5,7 +5,6 @@ from __future__ import (absolute_import, division, print_function,
 import logging
 
 from redis import StrictRedis
-from rq import pop_connection, push_connection
 from rq.compat import is_python_version
 
 if is_python_version((2, 7), (3, 2)):
@@ -52,7 +51,6 @@ class RQTestCase(unittest.TestCase):
     def setUpClass(cls):
         # Set up connection to Redis
         testconn = find_empty_redis_database()
-        push_connection(testconn)
 
         # Store the connection (for sanity checking)
         cls.testconn = testconn
@@ -77,7 +75,3 @@ class RQTestCase(unittest.TestCase):
     def tearDownClass(cls):
         logging.disable(logging.NOTSET)
 
-        # Pop the connection to Redis
-        testconn = pop_connection()
-        assert testconn == cls.testconn, \
-            'Wow, something really nasty happened to the Redis connection stack. Check your setup.'

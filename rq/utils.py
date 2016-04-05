@@ -15,7 +15,7 @@ import logging
 import sys
 from collections import Iterable
 
-from .compat import as_text, is_python_version, string_types
+from rq.compat import as_text, is_python_version, string_types
 
 
 class _Colorizer(object):
@@ -232,3 +232,7 @@ def enum(name, *sequential, **named):
     # On Python 3 it does not matter, so we'll use str(), which acts as
     # a no-op.
     return type(str(name), (), values)
+
+def compact(l):
+    return [x for x in l if x is not None]
+

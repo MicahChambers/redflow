@@ -1,9 +1,9 @@
 from .compat import as_text
-from .connections import resolve_connection
 from .exceptions import NoSuchJobError
 from .job import Job, JobStatus
 from .queue import FailedQueue
 from .utils import current_timestamp
+from .keys import deferred_registry_name_to_key
 
 
 class BaseRegistry(object):
@@ -15,7 +15,7 @@ class BaseRegistry(object):
 
     def __init__(self, name='default', connection=None):
         self.name = name
-        self.connection = resolve_connection(connection)
+        self._connection = connection
 
     def __len__(self):
         """Returns the number of jobs in this registry"""

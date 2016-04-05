@@ -10,7 +10,7 @@ from tests.helpers import strip_microseconds
 
 from rq.compat import PY2, as_text
 from rq.exceptions import NoSuchJobError, UnpickleError
-from rq.job import Job, get_current_job, JobStatus
+from rq.job import Job, JobStatus
 from rq.queue import Queue
 from rq.registry import DeferredJobRegistry
 from rq.utils import utcformat

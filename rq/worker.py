@@ -14,20 +14,19 @@ import traceback
 import warnings
 from datetime import timedelta
 
-from rq.compat import as_text, string_types, text_type
+from .compat import as_text, string_types, text_type
 
-from .connections import get_current_connection
 from .defaults import DEFAULT_RESULT_TTL, DEFAULT_WORKER_TTL
 from .exceptions import DequeueTimeout
 from .job import Job, JobStatus
 from .logutils import setup_loghandlers
-from .queue import Queue, get_failed_queue
+from .queue import Queue
 from .registry import FinishedJobRegistry, StartedJobRegistry, clean_registries
 from .suspension import is_suspended
 from .timeouts import UnixSignalDeathPenalty
-from .utils import (ensure_list, enum, import_attribute, make_colorizer,
-                    utcformat, utcnow, utcparse)
+from .utils import ensure_list, enum, make_colorizer, utcformat, utcnow, utcparse
 from .version import VERSION
+from .keys import worker_name_to_key, REDIS_WORKERS_KEY
 
 try:
     from procname import setprocname
@@ -50,9 +49,6 @@ class StopRequested(Exception):
 def iterable(x):
     return hasattr(x, '__iter__')
 
-
-def compact(l):
-    return [x for x in l if x is not None]
 
 _signames = dict((getattr(signal, signame), signame)
                  for signame in dir(signal)
@@ -78,68 +74,14 @@ WorkerStatus = enum(
 
 
 class Worker(object):
-    redis_worker_namespace_prefix = 'rq:worker:'
-    redis_workers_keys = 'rq:workers'
     death_penalty_class = UnixSignalDeathPenalty
-    queue_class = Queue
-    job_class = Job
 
-    @classmethod
-    def all(cls, connection=None):
-        """Returns an iterable of all Workers.
-        """
-        if connection is None:
-            connection = get_current_connection()
-        reported_working = connection.smembers(cls.redis_workers_keys)
-        workers = [cls.find_by_key(as_text(key), connection)
-                   for key in reported_working]
-        return compact(workers)
+    def __init__(self, queues, name=None, default_result_ttl=None,
+                 connection=None, exc_handler=None,
+                 exception_handlers=None, default_worker_ttl=None):
+        self._connection = connection
 
-    @classmethod
-    def find_by_key(cls, worker_key, connection=None):
-        """Returns a Worker instance, based on the naming conventions for
-        naming the internal Redis keys.  Can be used to reverse-lookup Workers
-        by their Redis keys.
-        """
-        prefix = cls.redis_worker_namespace_prefix
-        if not worker_key.startswith(prefix):
-            raise ValueError('Not a valid RQ worker key: {0}'.format(worker_key))
-
-        if connection is None:
-            connection = get_current_connection()
-        if not connection.exists(worker_key):
-            connection.srem(cls.redis_workers_keys, worker_key)
-            return None
-
-        name = worker_key[len(prefix):]
-        worker = cls([], name, connection=connection)
-        queues = as_text(connection.hget(worker.key, 'queues'))
-        worker._state = as_text(connection.hget(worker.key, 'state') or '?')
-        worker._job_id = connection.hget(worker.key, 'current_job') or None
-        if queues:
-            worker.queues = [cls.queue_class(queue, connection=connection)
-                             for queue in queues.split(',')]
-        return worker
-
-    def __init__(self, queues, name=None,
-                 default_result_ttl=None, connection=None, exc_handler=None,
-                 exception_handlers=None, default_worker_ttl=None,
-                 job_class=None, queue_class=None):  # noqa
-        if connection is None:
-            connection = get_current_connection()
-        self.connection = connection
-
-        if job_class is not None:
-            if isinstance(job_class, string_types):
-                job_class = import_attribute(job_class)
-            self.job_class = job_class
-
-        if queue_class is not None:
-            if isinstance(queue_class, string_types):
-                queue_class = import_attribute(queue_class)
-            self.queue_class = queue_class
-
-        queues = [self.queue_class(name=q, connection=connection)
+        queues = [Queue(name=q, connection=self._connection)
                   if isinstance(q, string_types) else q
                   for q in ensure_list(queues)]
         self._name = name
@@ -160,7 +102,7 @@ class Worker(object):
         self._horse_pid = 0
         self._stop_requested = False
         self.log = logger
-        self.failed_queue = get_failed_queue(connection=self.connection)
+        self.failed_queue = self._connection.get_failed_queue()
         self.last_cleaned_at = None
 
         # By default, push the "move-to-failed-queue" exception handler onto
@@ -182,8 +124,8 @@ class Worker(object):
     def validate_queues(self):
         """Sanity check for the given queues."""
         for queue in self.queues:
-            if not isinstance(queue, self.queue_class):
-                raise TypeError('{0} is not of type {1} or string types'.format(queue, self.queue_class))
+            if not isinstance(queue, Queue):
+                raise TypeError('{0} is not of type {1} or string types'.format(queue, Queue))
 
     def queue_names(self):
         """Returns the queue names of this worker's queues."""
@@ -210,7 +152,7 @@ class Worker(object):
     @property
     def key(self):
         """Returns the worker's Redis hash key."""
-        return self.redis_worker_namespace_prefix + self.name
+        return worker_name_to_key(self.name)
 
     @property
     def pid(self):
@@ -249,7 +191,7 @@ class Worker(object):
             p.delete(key)
             p.hset(key, 'birth', utcformat(utcnow()))
             p.hset(key, 'queues', queues)
-            p.sadd(self.redis_workers_keys, key)
+            p.sadd(REDIS_WORKERS_KEY, key)
             p.expire(key, self.default_worker_ttl)
             p.execute()
 
@@ -259,7 +201,7 @@ class Worker(object):
         with self.connection._pipeline() as p:
             # We cannot use self.state = 'dead' here, because that would
             # rollback the pipeline
-            p.srem(self.redis_workers_keys, self.key)
+            p.srem(REDIS_WORKERS_KEY, self.key)
             p.hset(self.key, 'death', utcformat(utcnow()))
             p.expire(self.key, 60)
             p.execute()
@@ -334,7 +276,7 @@ class Worker(object):
         if job_id is None:
             return None
 
-        return self.job_class.fetch(job_id, self.connection)
+        return Job.fetch(job_id, self.connection)
 
     def _install_signal_handlers(self):
         """Installs signal handlers for handling SIGINT and SIGTERM
@@ -473,8 +415,7 @@ class Worker(object):
             self.heartbeat()
 
             try:
-                result = self.queue_class.dequeue_any(self.queues, timeout,
-                                                      connection=self.connection)
+                result = self.connection.dequeue_any(self.queues, timeout)
                 if result is not None:
                     job, queue = result
                     self.log.info('{0}: {1} ({2})'.format(green(queue.name),
@@ -587,7 +528,7 @@ class Worker(object):
             started_job_registry = StartedJobRegistry(job.origin, self.connection)
 
             try:
-                with self.death_penalty_class(job.timeout or self.queue_class.DEFAULT_TIMEOUT):
+                with self.death_penalty_class(job.timeout or Queue.DEFAULT_TIMEOUT):
                     rv = job.perform()
 
                 # Pickle the result in the same try-except block since we need

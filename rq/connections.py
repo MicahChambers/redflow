@@ -2,22 +2,25 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-from contextlib import contextmanager
-
 from redis import StrictRedis
-from redis import Pipeline
+from redis import Redis
 
-from rq.compat import as_text
-from rq.exceptions import DequeueTimeout
-from rq.compat.connections import patch_connection
-from rq.local import LocalStack, release_local
+from .utils import compact
+from .keys import (queue_name_to_key, worker_name_to_key, worker_key_to_name,
+                   queue_key_to_name, REDIS_WORKERS_KEY, REDIS_QUEUES_KEY)
+from .queue import Queue
+from .job import Job
+from .worker import Worker
+from .exceptions import NoSuchJobError, UnpickleError
+from .compat import as_text
+from .exceptions import DequeueTimeout
 
 
 class NoRedisConnectionException(Exception):
     pass
 
 
-def RQConnection(object):
+class RQConnection(object):
     """
     RQ Connection Class. Main usage:
 
@@ -32,9 +35,8 @@ def RQConnection(object):
         if conn is None:
             self._redis_conn = StrictRedis()
             self._using_strict_redis = True
-        elif isinstance(conn, Redis) or isinstance(conn, Pipeline):
-            raise Exception("Redis and Pipeline are not supported, use "
-                            "StrictRedis and StrictPipeline")
+        elif isinstance(conn, Redis):
+            raise Exception("Connection Redis is not supported, use StrictRedis ")
         elif isinstance(conn, StrictRedis):
             self._using_strict_redis = True
             self._redis_conn = conn
@@ -49,6 +51,7 @@ def RQConnection(object):
         """
         # TODO maybe sync configs from keys? Configs might not be stored in
         # redis though
+        from rq.queue import Queue
         if name is None:
             return Queue(default_timeout=default_timeout, async=async,
                          job_class=job_class, connection=self)
@@ -56,16 +59,43 @@ def RQConnection(object):
             return Queue(name=name, default_timeout=default_timeout,
                          async=async, job_class=job_class, connection=self)
 
+    def get_workers(self):
+        """
+        Returns an iterable of all Workers.
+        """
+        reported_working = self._smembers(REDIS_WORKERS_KEY)
+        workers = [self.get_worker(worker_key_to_name(as_text(key)))
+                   for key in reported_working]
+        return compact(workers)
+
+    def get_worker(self, worker_name):
+        """
+        Returns a Worker instance
+        """
+        worker_key = worker_name_to_key(worker_name)
+        if not self._exists(worker_key):
+            self._srem(REDIS_WORKERS_KEY, worker_key)
+            return None
+
+        worker = Worker(worker_name, connection=self)
+        queues = as_text(self._hget(worker.key, 'queues'))
+        worker._state = as_text(self._hget(worker.key, 'state') or '?')
+        worker._job_id = self._hget(worker.key, 'current_job') or None
+        if queues:
+            worker.queues = [Queue(queue, connection=self)
+                             for queue in queues.split(',')]
+        return worker
+
+
+
     def get_queues(self):
         """
         Returns an iterable of all Queues.
         """
-        from rq.queue import queue_key_to_name
-        from rq.queue import REDIS_QUEUES_KEYS
         lst = []
-        for rq_key in _redis_conn.smembers(REDIS_QUEUES_KEYS):
+        for rq_key in self._smembers(REDIS_QUEUES_KEY):
             if rq_key:  # TODO does this ever evaluate to False?
-                q = get_queue(queue_key_to_name(rq_key))
+                q = self.get_queue(queue_key_to_name(rq_key))
                 lst.append[q]
         return lst
 
@@ -81,12 +111,6 @@ def RQConnection(object):
             return None
         return job
 
-    def cancel_job(self, job_id):
-        """Cancels the job with the given job ID, preventing execution.  Discards
-        any job info (i.e. it can't be requeued later).
-        """
-        Job(job_id, connection=self).cancel()
-
     def requeue_job(self, job_id):
         """Requeues the job with the given job ID.  If no such job exists, just
         remove the job ID from the failed queue, otherwise the job ID should refer
@@ -97,6 +121,7 @@ def RQConnection(object):
 
     def get_failed_queue(self):
         """Returns a handle to the special failed queue."""
+        from rq.queue import FailedQueue
         return FailedQueue(connection=self)
 
     def dequeue_any(self, queues, timeout):
@@ -111,9 +136,6 @@ def RQConnection(object):
 
         See the documentation of cls.lpop for the interpretation of timeout.
         """
-        from rq.queue import Queue
-        from rq.queue import queue_name_to_key
-        from rq.queue import queue_key_to_name
 
         # Resolve queue keys
         queue_keys = []
@@ -124,23 +146,23 @@ def RQConnection(object):
                 queue_keys.append(q.key)
 
         while True:
-            result = self._lpop(queue_keys, timeout, connection=connection)
+            result = self._lpop(queue_keys, timeout)
             if result is None:
                 return None
 
             # Convert queue key and job id back into Queue and Job objects
             try:
+                queue_key, job_id = result
                 job = Job(job_id, connection=self)
                 job.refresh()
             except NoSuchJobError:
                 # Silently pass on jobs that don't exist (anymore),
-                # and continue in the look
                 continue
             except UnpickleError as e:
                 # Attach queue information on the exception for improved error
                 # reporting
                 e.job_id = job_id
-                e.queue = queue
+                e.queue = queue_key_to_name(queue_key)
                 raise e
 
             queue_key, job_id = map(as_text, result)
@@ -179,14 +201,14 @@ def RQConnection(object):
             if timeout == 0:
                 raise ValueError('RQ does not support indefinite timeouts. '
                                  'Please pick a timeout value > 0')
-            result = _redis_conn.blpop(queue_keys, timeout)
+            result = self._redis_conn.blpop(queue_keys, timeout)
             if result is None:
                 raise DequeueTimeout(timeout, queue_keys)
             queue_key, job_id = result
             return queue_key, job_id
         else:  # non-blocking variant
             for queue_key in queue_keys:
-                blob = _redis_conn.lpop(queue_key)
+                blob = self._redis_conn.lpop(queue_key)
                 if blob is not None:
                     return queue_key, blob
             return None
@@ -209,7 +231,7 @@ def RQConnection(object):
             return self._redis_conn(name, *args, **kwargs)
         else:
             # swap order so that order is correct for non-strict redis conn
-            swapped_args = [name, score for score, name in args]
+            swapped_args = [(key, score) for score, key in args]
             return self._redis_conn(name, *swapped_args, **kwargs)
 
     def __getattr__(self, attr_name, defvalue):
@@ -219,8 +241,7 @@ def RQConnection(object):
         if attr_name.startswith('_') and hasattr(self._redis_conn, attr_name[1:]):
             return getattr(self._redis_conn, attr_name[1:])
 
-__all__ = ['Connection']
-
+__all__ = ['RQConnection']
 
 #def push_connection(redis):
 #    """Pushes the given connection on the stack."""

@@ -9,7 +9,7 @@ from __future__ import (absolute_import, division, print_function,
 import os
 import time
 
-from rq import Connection, get_current_job
+from rq import RQConnection
 from rq.decorators import job
 from rq.compat import PY2
 
@@ -54,10 +54,6 @@ def create_file_after_timeout(path, timeout):
     create_file(path)
 
 
-def access_self():
-    assert get_current_job() is not None
-
-
 def echo(*args, **kwargs):
     return (args, kwargs)
 
@@ -87,11 +83,11 @@ class UnicodeStringObject(object):
             return u'é'
 
 
-with Connection():
-    @job(queue='default')
-    def decorated_job(x, y):
-        return x + y
-
+#with Connection():
+#    @job(queue='default')
+#    def decorated_job(x, y):
+#        return x + y
+#
 
 def black_hole(job, *exc_info):
     # Don't fall through to default behaviour (moving to failed queue)

@@ -4,14 +4,11 @@ from __future__ import (absolute_import, division, print_function,
 
 import uuid
 
-from redis import WatchError
-
-from rq.compat import as_text, string_types, total_ordering
-from rq.defaults import DEFAULT_RESULT_TTL
-from rq.exceptions import (InvalidJobOperationError, NoSuchJobError, UnpickleError)
-from rq.job import Job, JobStatus
-from rq.utils import import_attribute, utcnow
-from rq.keys import queue_name_to_key, queue_key_to_name, REDIS_QUEUES_KEY
+from .compat import as_text, string_types, total_ordering
+from .exceptions import (InvalidJobOperationError, NoSuchJobError, UnpickleError)
+from .job import Job, JobStatus
+from .utils import utcnow
+from .keys import queue_name_to_key, REDIS_QUEUES_KEY
 
 def compact(lst):
     return [item for item in lst if item is not None]
@@ -24,6 +21,7 @@ class Queue(object):
     def __init__(self, name='default', default_timeout=None, async=True,
                  connection=None):
 
+        from rq.connection import RQConnection
         if isinstance(connection, RQConnection):
             self._connection = connection
         else:
@@ -189,7 +187,7 @@ class Queue(object):
 
         if 'args' in kwargs or 'kwargs' in kwargs:
             assert args == (), 'Extra positional arguments cannot be used ' \
-                    'when using explicit args and kwargs'
+                'when using explicit args and kwargs'
             args = kwargs.pop('args', None)
             kwargs = kwargs.pop('kwargs', None)
 
