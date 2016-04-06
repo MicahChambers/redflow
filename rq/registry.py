@@ -15,7 +15,12 @@ class BaseRegistry(object):
 
     def __init__(self, name='default', connection=None):
         self.name = name
-        self._connection = connection
+
+        from . import RQConnection
+        if isinstance(connection, RQConnection):
+            self._connection = connection
+        else:
+            self._connection = RQConnection(connection)
 
     def __len__(self):
         """Returns the number of jobs in this registry"""
@@ -25,15 +30,15 @@ class BaseRegistry(object):
     def count(self):
         """Returns the number of jobs in this registry"""
         self.cleanup()
-        return self.connection._zcard(self.key)
+        return self._connection._zcard(self.key)
 
     def add(self, job, ttl=0):
         """Adds a job to a registry with expiry time of now + ttl."""
         score = ttl if ttl < 0 else current_timestamp() + ttl
-        return self.connection._zadd(self.key, score, job.id)
+        return self._connection._zadd(self.key, score, job.id)
 
     def remove(self, job):
-        return self.connection._zrem(self.key, job.id)
+        return self._connection._zrem(self.key, job.id)
 
     def get_expired_job_ids(self, timestamp=None):
         """Returns job ids whose score are less than current timestamp.
@@ -44,13 +49,13 @@ class BaseRegistry(object):
         """
         score = timestamp if timestamp is not None else current_timestamp()
         return [as_text(job_id) for job_id in
-                self.connection.zrangebyscore(self.key, 0, score)]
+                self._connection._zrangebyscore(self.key, 0, score)]
 
     def get_job_ids(self, start=0, end=-1):
         """Returns list of all job ids."""
         self.cleanup()
         return [as_text(job_id) for job_id in
-                self.connection.zrange(self.key, start, end)]
+                self._connection._zrange(self.key, start, end)]
 
 
 class StartedJobRegistry(BaseRegistry):

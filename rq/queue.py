@@ -4,6 +4,7 @@ from __future__ import (absolute_import, division, print_function,
 
 import uuid
 
+from .defaults import DEFAULT_RESULT_TTL
 from .compat import as_text, string_types, total_ordering
 from .exceptions import (InvalidJobOperationError, NoSuchJobError, UnpickleError)
 from .job import Job, JobStatus
@@ -21,7 +22,7 @@ class Queue(object):
     def __init__(self, name='default', default_timeout=None, async=True,
                  connection=None):
 
-        from rq.connection import RQConnection
+        from . import RQConnection
         if isinstance(connection, RQConnection):
             self._connection = connection
         else:
@@ -61,15 +62,12 @@ class Queue(object):
             end
             return count
         """
-        script = self.connection._register_script(script)
+        script = self._connection._register_script(script)
         return script(keys=[self.key])
 
     def is_empty(self):
         """Returns whether the current queue is empty."""
         return self.count == 0
-
-    def get_job(self, job_id):
-        return self._connection.get_job(job_id)
 
     def get_job_ids(self, offset=0, length=-1):
         """Returns a slice of job IDs in the queue."""
@@ -130,10 +128,9 @@ class Queue(object):
         else:
             self._connection._rpush(self.key, job_id)
 
-    ## TODO HERE
     def enqueue_call(self, func, args=None, kwargs=None, timeout=None,
                      result_ttl=None, ttl=None, description=None,
-                     depends_on=None, job_id=None, at_front=False, meta=None):
+                     depends_on=None, at_front=False, meta=None):
         """
         Creates a job to represent the delayed function call and enqueues it.
 
@@ -145,15 +142,23 @@ class Queue(object):
 
         # All jobs should start as deferred, Note: the definitive job status is
         # the status field, not whether the job is in the deferred registry
-        job = Job(connection=self.connection)
-        job.create(func, args=args, kwargs=kwargs, connection=self._connection,
-                   result_ttl=result_ttl, ttl=ttl, status=JobStatus.DEFERRED,
-                   description=description, depends_on=depends_on,
-                   timeout=timeout, id=job_id, origin=self.name, meta=meta)
+        job = Job(connection=self._connection)
+        job.create(func=func, args=args, kwargs=kwargs, result_ttl=result_ttl,
+                   ttl=ttl, status=JobStatus.DEFERRED, description=description,
+                   depends_on=depends_on, timeout=timeout, origin=self.name,
+                   meta=meta)
         job.save()
 
-        self._connection._sadd(REDIS_QUEUES_KEY, self.key)
-        job._attempt_enqueue()
+        # Make sure the queue actually exists
+        if self._async:
+            self._connection._sadd(REDIS_QUEUES_KEY, self.key)
+            job._attempt_enqueue()
+        else:
+            job.perform()
+            job.set_status(JobStatus.FINISHED)
+            job.save()
+            job.cleanup(DEFAULT_RESULT_TTL)
+
         return job
 
     def enqueue(self, f, *args, **kwargs):
@@ -181,7 +186,6 @@ class Queue(object):
         result_ttl = kwargs.pop('result_ttl', None)
         ttl = kwargs.pop('ttl', None)
         depends_on = kwargs.pop('depends_on', None)
-        job_id = kwargs.pop('job_id', None)
         at_front = kwargs.pop('at_front', False)
         meta = kwargs.pop('meta', None)
 
@@ -192,9 +196,10 @@ class Queue(object):
             kwargs = kwargs.pop('kwargs', None)
 
         return self.enqueue_call(func=f, args=args, kwargs=kwargs,
-                                 timeout=timeout, result_ttl=result_ttl, ttl=ttl,
-                                 description=description, depends_on=depends_on,
-                                 job_id=job_id, at_front=at_front, meta=meta)
+                                 timeout=timeout, result_ttl=result_ttl,
+                                 ttl=ttl, description=description,
+                                 depends_on=depends_on, at_front=at_front,
+                                 meta=meta)
 
     def pop_job_id(self):
         """Pops a given job ID from this Redis queue."""
@@ -210,7 +215,7 @@ class Queue(object):
             if job_id is None:
                 return None
             try:
-                job = Job.fetch(job_id, connection=self._connection)
+                job = self._connection.get_job(job_id)
             except NoSuchJobError as e:
                 # Silently pass on jobs that don't exist (anymore),
                 continue
@@ -249,8 +254,8 @@ class FailedQueue(Queue):
         super(FailedQueue, self).__init__(JobStatus.FAILED, connection=connection)
 
     def quarantine(self, job, exc_info):
-        """Puts the given Job in quarantine (i.e. put it on the failed
-        queue).
+        """
+        Puts the given Job in quarantine (i.e. put it on the failed queue)
         """
 
         with self._connection._pipeline() as pipeline:
@@ -267,9 +272,10 @@ class FailedQueue(Queue):
         return job
 
     def requeue(self, job_id):
-        """Requeues the job with the given job ID."""
+        """ Requeues the job with the given job ID. """
         try:
-            job = Job.fetch(job_id, connection=self._connection)
+            job = Job(id=job_id, connection=self._connection)
+            job.refresh()
         except NoSuchJobError:
             # Silently ignore/remove this job and return (i.e. do nothing)
             self.remove(job_id)

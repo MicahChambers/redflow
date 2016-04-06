@@ -55,8 +55,107 @@ def unpickle(pickled_string):
 
 
 class Job(object):
-    """A Job is just a convenient datastructure to pass around job (meta) data.
     """
+    A Job is just a convenient datastructure to pass around job (meta) data.
+    """
+
+    def __init__(self, id=None, connection=None):
+        from rq.connections import RQConnection
+        if isinstance(connection, RQConnection):
+            self._connection = connection
+        else:
+            self._connection = RQConnection(connection)
+
+        if id is None:
+            self._id = text_type(uuid4())
+        else:
+            self._id = id
+
+        self.created_at = utcnow()
+        self._data = UNEVALUATED
+        self._func_name = UNEVALUATED
+        self._instance = UNEVALUATED
+        self._args = UNEVALUATED
+        self._kwargs = UNEVALUATED
+        self.description = None
+        self.origin = None
+        self.enqueued_at = None
+        self.started_at = None
+        self.ended_at = None
+        self._result = None
+        self.exc_info = None
+        self.timeout = None
+        self.result_ttl = None
+        self.ttl = None
+        self._status = None
+        self._dependency_ids = None
+        self.meta = {}
+
+    def create(self, func, args=None, kwargs=None, result_ttl=None,
+               ttl=None, status=None, description=None, depends_on=None,
+               timeout=None, origin=None, meta=None):
+        """
+        Actually fills in parameters. Similar to refresh, but instead of pulling
+        remote properties sets new propertys. Note that the result is not saved,
+        so if you want the updated job to persist you must call:
+
+            >>> job.create(...)
+            >>> job.save()
+        """
+        if args is None:
+            args = ()
+        if kwargs is None:
+            kwargs = {}
+
+        if not isinstance(args, (tuple, list)):
+            raise TypeError('{0!r} is not a valid args list'.format(args))
+        if not isinstance(kwargs, dict):
+            raise TypeError('{0!r} is not a valid kwargs dict'.format(kwargs))
+
+        if origin is not None:
+            self.origin = origin
+
+        # Set the core job tuple properties
+        self._instance = None
+        if inspect.ismethod(func):
+            self._instance = func.__self__
+            self._func_name = func.__name__
+        elif inspect.isfunction(func) or inspect.isbuiltin(func):
+            self._func_name = '{0}.{1}'.format(func.__module__, func.__name__)
+        elif isinstance(func, string_types):
+            self._func_name = as_text(func)
+        elif not inspect.isclass(func) and hasattr(func, '__call__'):  # a callable class instance
+            self._instance = func
+            self._func_name = '__call__'
+        else:
+            raise TypeError('Expected a callable or a string, but got: {}'.format(func))
+        self._args = args
+        self._kwargs = kwargs
+
+        # Extra meta data
+        self.description = description or self.get_call_string()
+        self.result_ttl = result_ttl
+        self.ttl = ttl
+        self.timeout = timeout
+        self._status = status
+        self.meta = meta or {}
+
+        # dependencies could be a single job or a list of jobs
+        if depends_on:
+            if isinstance(depends_on, list):
+                self._dependency_ids = [tmp.id for tmp in depends_on]
+            elif isinstance(depends_on, Job):
+                self._dependency_ids = [depends_on.id]
+            else:
+                self._dependency_ids = [depends_on]
+        else:
+            self._dependency_ids = []
+
+        return self
+
+    @property
+    def id(self):
+        return self._id
 
     def get_status(self):
         self._status = as_text(self._connection._hget(self.key, 'status'))
@@ -209,53 +308,8 @@ class Job(object):
         self._kwargs = value
         self._data = UNEVALUATED
 
-    def __init__(self, id=None, connection=None):
-        from rq.connection import RQConnection
-        if isinstance(connection, RQConnection):
-            self._connection = connection
-        else:
-            self._connection = RQConnection(connection)
-
-        self._id = id
-        self.created_at = utcnow()
-        self._data = UNEVALUATED
-        self._func_name = UNEVALUATED
-        self._instance = UNEVALUATED
-        self._args = UNEVALUATED
-        self._kwargs = UNEVALUATED
-        self.description = None
-        self.origin = None
-        self.enqueued_at = None
-        self.started_at = None
-        self.ended_at = None
-        self._result = None
-        self.exc_info = None
-        self.timeout = None
-        self.result_ttl = None
-        self.ttl = None
-        self._status = None
-        self._dependency_ids = None
-        self.meta = {}
-
     def __repr__(self):  # noqa
         return 'Job({0!r}, enqueued_at={1!r})'.format(self._id, self.enqueued_at)
-
-    # Data access
-    def get_id(self):  # noqa
-        """The job ID for this job instance. Generates an ID lazily the
-        first time the ID is requested.
-        """
-        if self._id is None:
-            self._id = text_type(uuid4())
-        return self._id
-
-    def set_id(self, value):
-        """Sets a job ID for the given job."""
-        if not isinstance(value, string_types):
-            raise TypeError('id must be a string, not {0}'.format(type(value)))
-        self._id = value
-
-    id = property(get_id, set_id)
 
     @property
     def key(self):
@@ -295,67 +349,6 @@ class Job(object):
     """Backwards-compatibility accessor property `return_value`."""
     return_value = result
 
-    def create(self, func, args=None, kwargs=None, result_ttl=None,
-               ttl=None, status=None, description=None, depends_on=None,
-               timeout=None, id=None, origin=None, meta=None):
-        """
-        Actually fills in parameters. Similar to refresh, but instead of pulling
-        remote properties sets new propertys. Note that the result is not saved,
-        so if you want the updated job to persist you must call:
-
-            >>> job.create(...)
-            >>> job.save()
-        """
-        if args is None:
-            args = ()
-        if kwargs is None:
-            kwargs = {}
-
-        if not isinstance(args, (tuple, list)):
-            raise TypeError('{0!r} is not a valid args list'.format(args))
-        if not isinstance(kwargs, dict):
-            raise TypeError('{0!r} is not a valid kwargs dict'.format(kwargs))
-
-        if id is not None:
-            self.set_id(id)
-
-        if origin is not None:
-            self.origin = origin
-
-        # Set the core job tuple properties
-        self._instance = None
-        if inspect.ismethod(func):
-            self._instance = func.__self__
-            self._func_name = func.__name__
-        elif inspect.isfunction(func) or inspect.isbuiltin(func):
-            self._func_name = '{0}.{1}'.format(func.__module__, func.__name__)
-        elif isinstance(func, string_types):
-            self._func_name = as_text(func)
-        elif not inspect.isclass(func) and hasattr(func, '__call__'):  # a callable class instance
-            self._instance = func
-            self._func_name = '__call__'
-        else:
-            raise TypeError('Expected a callable or a string, but got: {}'.format(func))
-        self._args = args
-        self._kwargs = kwargs
-
-        # Extra meta data
-        self.description = description or self.get_call_string()
-        self.result_ttl = result_ttl
-        self.ttl = ttl
-        self.timeout = timeout
-        self._status = status
-        self.meta = meta or {}
-
-        # dependencies could be a single job or a list of jobs
-        if depends_on:
-            if isinstance(depends_on, list):
-                self._dependency_ids = [tmp.id for tmp in depends_on]
-            elif isinstance(depends_on, Job):
-                self._dependency_ids = [depends_on.id]
-            else:
-                self._dependency_ids = [depends_on]
-
     # Persistence
     def refresh(self):  # noqa
         """
@@ -369,29 +362,23 @@ class Job(object):
         if len(obj) == 0:
             raise NoSuchJobError('No such job: {0}'.format(key))
 
-        def to_date(date_str):
-            if date_str is None:
-                return
-            else:
-                return utcparse(as_text(date_str))
-
         try:
             self.data = obj['data']
         except KeyError:
             raise NoSuchJobError('Unexpected job format: {0}'.format(obj))
 
-        self.created_at = to_date(as_text(obj.get('created_at')))
+        self.created_at = utcparse(as_text(obj.get('created_at')))
         self.origin = as_text(obj.get('origin'))
         self.description = as_text(obj.get('description'))
-        self.enqueued_at = to_date(as_text(obj.get('enqueued_at')))
-        self.started_at = to_date(as_text(obj.get('started_at')))
-        self.ended_at = to_date(as_text(obj.get('ended_at')))
+        self.enqueued_at = utcparse(as_text(obj.get('enqueued_at')))
+        self.started_at = utcparse(as_text(obj.get('started_at')))
+        self.ended_at = utcparse(as_text(obj.get('ended_at')))
         self._result = unpickle(obj.get('result')) if obj.get('result') else None  # noqa
         self.exc_info = as_text(obj.get('exc_info'))
         self.timeout = int(obj.get('timeout')) if obj.get('timeout') else None
         self.result_ttl = int(obj.get('result_ttl')) if obj.get('result_ttl') else None  # noqa
         self._status = as_text(obj.get('status') if obj.get('status') else None)
-        self._dependency_ids = as_text(obj.get('dependency_ids', '')).split(' ')
+        self._dependency_ids = as_text(obj.get('dependency_ids', '')).split(',')
         self.ttl = int(obj.get('ttl')) if obj.get('ttl') else None
         self.meta = unpickle(obj.get('meta')) if obj.get('meta') else {}
 
@@ -422,7 +409,7 @@ class Job(object):
         if self._status is not None:
             obj['status'] = self._status
         if self._dependency_ids is not None:
-            obj['dependency_ids'] = ' '.join(self._dependency_ids)
+            obj['dependency_ids'] = ','.join(self._dependency_ids)
         if self.meta:
             obj['meta'] = dumps(self.meta)
         if self.ttl:

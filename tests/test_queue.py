@@ -2,11 +2,11 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-from tests import RQTestCase
+from tests import RQTestCase, find_empty_redis_database
 from tests.fixtures import (div_by_zero, echo, Number, say_hello,
                             some_calculation)
 
-from rq import get_failed_queue, Queue
+from rq import Queue, RQConnection
 from rq.exceptions import InvalidJobOperationError
 from rq.job import Job, JobStatus
 from rq.registry import DeferredJobRegistry
@@ -18,21 +18,24 @@ class CustomJob(Job):
 
 
 class TestQueue(RQTestCase):
+    def setUp(self):
+        self.conn = RQConnection(find_empty_redis_database())
+
     def test_create_queue(self):
         """Creating queues."""
-        q = Queue('my-queue')
+        q = Queue('my-queue', connection=self.conn)
         self.assertEqual(q.name, 'my-queue')
 
     def test_create_default_queue(self):
         """Instantiating the default queue."""
-        q = Queue()
+        q = Queue(connection=self.conn)
         self.assertEqual(q.name, 'default')
 
     def test_equality(self):
         """Mathematical equality of queues."""
-        q1 = Queue('foo')
-        q2 = Queue('foo')
-        q3 = Queue('bar')
+        q1 = Queue('foo', connection=self.conn)
+        q2 = Queue('foo', connection=self.conn)
+        q3 = Queue('bar', connection=self.conn)
 
         self.assertEqual(q1, q2)
         self.assertEqual(q2, q1)
@@ -41,7 +44,7 @@ class TestQueue(RQTestCase):
 
     def test_empty_queue(self):
         """Emptying queues."""
-        q = Queue('example')
+        q = Queue('example', connection=self.conn)
 
         self.testconn.rpush('rq:queue:example', 'foo')
         self.testconn.rpush('rq:queue:example', 'bar')
@@ -54,7 +57,7 @@ class TestQueue(RQTestCase):
 
     def test_empty_removes_jobs(self):
         """Emptying a queue deletes the associated job objects"""
-        q = Queue('example')
+        q = Queue('example', connection=self.conn)
         job = q.enqueue(say_hello)
         self.assertTrue(Job.exists(job.id))
         q.empty()
@@ -62,7 +65,7 @@ class TestQueue(RQTestCase):
 
     def test_queue_is_empty(self):
         """Detecting empty queues."""
-        q = Queue('example')
+        q = Queue('example', connection=self.conn)
         self.assertEqual(q.is_empty(), True)
 
         self.testconn.rpush('rq:queue:example', 'sentinel message')
@@ -70,7 +73,7 @@ class TestQueue(RQTestCase):
 
     def test_remove(self):
         """Ensure queue.remove properly removes Job from queue."""
-        q = Queue('example')
+        q = Queue('example', connection=self.conn)
         job = q.enqueue(say_hello)
         self.assertIn(job.id, q.job_ids)
         q.remove(job)
@@ -83,7 +86,7 @@ class TestQueue(RQTestCase):
 
     def test_jobs(self):
         """Getting jobs out of a queue."""
-        q = Queue('example')
+        q = Queue('example', connection=self.conn)
         self.assertEqual(q.jobs, [])
         job = q.enqueue(say_hello)
         self.assertEqual(q.jobs, [job])
@@ -94,7 +97,7 @@ class TestQueue(RQTestCase):
 
     def test_compact(self):
         """Queue.compact() removes non-existing jobs."""
-        q = Queue()
+        q = Queue(connection=self.conn)
 
         q.enqueue(say_hello, 'Alice')
         q.enqueue(say_hello, 'Charlie')
@@ -110,7 +113,7 @@ class TestQueue(RQTestCase):
 
     def test_enqueue(self):
         """Enqueueing job onto queues."""
-        q = Queue()
+        q = Queue(connection=self.conn)
         self.assertEqual(q.is_empty(), True)
 
         # say_hello spec holds which queue this is sent to
@@ -142,7 +145,7 @@ class TestQueue(RQTestCase):
     def test_pop_job_id(self):
         """Popping job IDs from queues."""
         # Set up
-        q = Queue()
+        q = Queue(connection=self.conn)
         uuid = '112188ae-4e9d-4a5b-a5b3-f26f2cb054da'
         q.push_job_id(uuid)
 
@@ -156,7 +159,7 @@ class TestQueue(RQTestCase):
     def test_dequeue(self):
         """Dequeueing jobs from queues."""
         # Set up
-        q = Queue()
+        q = Queue(connection=self.conn)
         result = q.enqueue(say_hello, 'Rick', foo='bar')
 
         # Dequeue a job (not a job ID) off the queue
@@ -173,7 +176,7 @@ class TestQueue(RQTestCase):
 
     def test_dequeue_deleted_jobs(self):
         """Dequeueing deleted jobs from queues don't blow the stack."""
-        q = Queue()
+        q = Queue(connection=self.conn)
         for _ in range(1, 1000):
             job = q.enqueue(say_hello)
             job.delete()
@@ -181,7 +184,7 @@ class TestQueue(RQTestCase):
 
     def test_dequeue_instance_method(self):
         """Dequeueing instance method jobs from queues."""
-        q = Queue()
+        q = Queue(connection=self.conn)
         n = Number(2)
         q.enqueue(n.div, 4)
 
@@ -195,7 +198,7 @@ class TestQueue(RQTestCase):
 
     def test_dequeue_class_method(self):
         """Dequeueing class method jobs from queues."""
-        q = Queue()
+        q = Queue(connection=self.conn)
         q.enqueue(Number.divide, 3, 4)
 
         job = q.dequeue()
@@ -207,7 +210,7 @@ class TestQueue(RQTestCase):
     def test_dequeue_ignores_nonexisting_jobs(self):
         """Dequeuing silently ignores non-existing jobs."""
 
-        q = Queue()
+        q = Queue(connection=self.conn)
         uuid = '49f205ab-8ea3-47dd-a1b5-bfa186870fc8'
         q.push_job_id(uuid)
         q.push_job_id(uuid)
@@ -222,8 +225,8 @@ class TestQueue(RQTestCase):
 
     def test_dequeue_any(self):
         """Fetching work from any given queue."""
-        fooq = Queue('foo')
-        barq = Queue('bar')
+        fooq = Queue('foo', connection=self.conn)
+        barq = Queue('bar', connection=self.conn)
 
         self.assertEqual(Queue.dequeue_any([fooq, barq], None), None)
 
@@ -254,32 +257,32 @@ class TestQueue(RQTestCase):
     def test_dequeue_any_ignores_nonexisting_jobs(self):
         """Dequeuing (from any queue) silently ignores non-existing jobs."""
 
-        q = Queue('low')
+        q = Queue('low', connection=self.conn)
         uuid = '49f205ab-8ea3-47dd-a1b5-bfa186870fc8'
         q.push_job_id(uuid)
 
         # Dequeue simply ignores the missing job and returns None
         self.assertEqual(q.count, 1)
-        self.assertEqual(Queue.dequeue_any([Queue(), Queue('low')], None),  # noqa
+        self.assertEqual(Queue.dequeue_any([Queue(connection=self.conn), Queue('low', connection=self.conn)], None),  # noqa
                 None)
         self.assertEqual(q.count, 0)
 
     def test_enqueue_sets_status(self):
         """Enqueueing a job sets its status to "queued"."""
-        q = Queue()
+        q = Queue(connection=self.conn)
         job = q.enqueue(say_hello)
         self.assertEqual(job.get_status(), JobStatus.QUEUED)
 
     def test_enqueue_meta_arg(self):
         """enqueue() can set the job.meta contents."""
-        q = Queue()
+        q = Queue(connection=self.conn)
         job = q.enqueue(say_hello, meta={'foo': 'bar', 'baz': 42})
         self.assertEqual(job.meta['foo'], 'bar')
         self.assertEqual(job.meta['baz'], 42)
 
     def test_enqueue_explicit_args(self):
         """enqueue() works for both implicit/explicit args."""
-        q = Queue()
+        q = Queue(connection=self.conn)
 
         # Implicit args/kwargs mode
         job = q.enqueue(echo, 1, timeout=1, result_ttl=1, bar='baz')
@@ -305,9 +308,9 @@ class TestQueue(RQTestCase):
 
     def test_all_queues(self):
         """All queues"""
-        q1 = Queue('first-queue')
-        q2 = Queue('second-queue')
-        q3 = Queue('third-queue')
+        q1 = Queue('first-queue', connection=self.conn)
+        q2 = Queue('second-queue', connection=self.conn)
+        q3 = Queue('third-queue', connection=self.conn)
 
         # Ensure a queue is added only once a job is enqueued
         self.assertEqual(len(Queue.all()), 0)

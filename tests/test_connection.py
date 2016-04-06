@@ -28,3 +28,11 @@ class TestConnectionInheritance(RQTestCase):
         """ Test getting workers when none are there """
         conn = RQConnection(new_connection())
         self.assertEqual(conn.get_workers(), [])
+
+    def test_getting_failed_queue(self):
+        """ Test getting failed queue when its empty """
+        conn = RQConnection(new_connection())
+        failed_queue = conn.get_failed_queue()
+
+        self.assertEqual(failed_queue.count, 0)
+

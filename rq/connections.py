@@ -109,7 +109,7 @@ class RQConnection(object):
         Fetches a persisted job from its corresponding Redis key and
         instantiates it.
         """
-        job = Job(job_id, connection=self)
+        job = Job(connection=self, id=job_id)
         try:
             job.refresh()
         except NoSuchJobError:

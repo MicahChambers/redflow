@@ -11,6 +11,7 @@ from __future__ import (absolute_import, division, print_function,
 import calendar
 import datetime
 import importlib
+import iso8601
 import logging
 import sys
 from collections import Iterable
@@ -156,15 +157,14 @@ def utcnow():
 
 
 def utcformat(dt):
-    return dt.strftime(as_text('%Y-%m-%dT%H:%M:%SZ'))
+    return dt.isoformat()
 
 
 def utcparse(string):
-    try:
-        return datetime.datetime.strptime(string, '%Y-%m-%dT%H:%M:%SZ')
-    except ValueError:
-        # This catches RQ < 0.4 datetime format
-        return datetime.datetime.strptime(string, '%Y-%m-%dT%H:%M:%S.%f+00:00')
+    if string is None:
+        return None
+    else:
+        return iso8601.parse_date(string)
 
 
 def first(iterable, default=None, key=None):
