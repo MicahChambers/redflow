@@ -2,7 +2,7 @@ WORKERS_SUSPENDED = 'rq:suspended'
 
 
 def is_suspended(connection):
-    return connection.exists(WORKERS_SUSPENDED)
+    return connection._exists(WORKERS_SUSPENDED)
 
 
 def suspend(connection, ttl=None):

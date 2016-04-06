@@ -50,8 +50,7 @@ class RQConnection(object):
         """
         return self._redis_conn.ping()
 
-    def get_queue(self, name=None, default_timeout=None, async=True,
-                  job_class=None):
+    def get_queue(self, name=None, default_timeout=None, async=True):
         """
         Get a queue object. Note that this doesn't actually hit the redis
         backend and using the queue will implicity create it.
@@ -61,10 +60,10 @@ class RQConnection(object):
         from rq.queue import Queue
         if name is None:
             return Queue(default_timeout=default_timeout, async=async,
-                         job_class=job_class, connection=self)
+                         connection=self)
         else:
             return Queue(name=name, default_timeout=default_timeout,
-                         async=async, job_class=job_class, connection=self)
+                         async=async, connection=self)
 
     def get_workers(self):
         """
@@ -101,7 +100,7 @@ class RQConnection(object):
         for rq_key in self._smembers(REDIS_QUEUES_KEY):
             if rq_key:  # TODO does this ever evaluate to False?
                 q = self.get_queue(queue_key_to_name(rq_key))
-                lst.append[q]
+                lst.append(q)
         return lst
 
     def get_job(self, job_id):
@@ -122,7 +121,7 @@ class RQConnection(object):
 
     def dequeue_any(self, queues, timeout):
         """
-        Returns job_class instance at the front of the given set of Queues,
+        Returns Job instance at the front of the given set of Queues,
         where the order of the queues is important.
 
         When all of the Queues are empty, depending on the `timeout` argument,
@@ -142,7 +141,7 @@ class RQConnection(object):
                 queue_keys.append(q.key)
 
         while True:
-            result = self._lpop(queue_keys, timeout)
+            result = self._pop_from_one(queue_keys, timeout)
             if result is None:
                 return None
 
@@ -171,7 +170,7 @@ class RQConnection(object):
     # Wrappers around needed redis functions to ensure consistent interface,
     # and so pipelines can be used transparently
     ##
-    def _lpop(self, queue_keys, timeout):
+    def _pop_from_one(self, queue_keys, timeout=None):
         """
         Helper method. Intermediate method to abstract away from some
         Redis API details.
@@ -193,6 +192,9 @@ class RQConnection(object):
             None - non-blocking (return immediately)
              > 0 - maximum number of seconds to block
         """
+        if isinstance(queue_keys, basestring):
+            queue_keys = [queue_keys]
+
         if timeout is not None:  # blocking variant
             if timeout == 0:
                 raise ValueError('RQ does not support indefinite timeouts. '
@@ -214,9 +216,9 @@ class RQConnection(object):
 
     def _lrem(self, name, count, value):
         if self._using_strict_redis:
-            return self._redis_conn(name=name, count=count, value=value)
+            return self._redis_conn.lrem(name=name, count=count, value=value)
         else:
-            return self._redis_conn(name=name, num=count, value=value)
+            return self._redis_conn.lrem(name=name, num=count, value=value)
 
     def _zadd(self, name, *args, **kwargs):
         """
@@ -224,18 +226,21 @@ class RQConnection(object):
         """
         if self._using_strict_redis:
             # The redis connection is struct
-            return self._redis_conn(name, *args, **kwargs)
+            return self._redis_conn.zadd(name, *args, **kwargs)
         else:
             # swap order so that order is correct for non-strict redis conn
             swapped_args = [(key, score) for score, key in args]
-            return self._redis_conn(name, *swapped_args, **kwargs)
+            return self._redis_conn.zadd(name, *swapped_args, **kwargs)
 
-    def __getattr__(self, attr_name, defvalue=None):
+    def __getattr__(self, attr_name):
         """
         Passes through unmodified redis functions if possible
         """
         if attr_name.startswith('_') and hasattr(self._redis_conn, attr_name[1:]):
             return getattr(self._redis_conn, attr_name[1:])
+        else:
+            raise AttributeError('{} has no attribute "{}"'.format(type(self),
+                                                                   attr_name))
 
 __all__ = ['RQConnection']
 

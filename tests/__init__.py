@@ -6,6 +6,7 @@ import logging
 
 from redis import StrictRedis
 from rq.compat import is_python_version
+from rq import RQConnection
 
 if is_python_version((2, 7), (3, 2)):
     import unittest
@@ -61,6 +62,7 @@ class RQTestCase(unittest.TestCase):
     def setUp(self):
         # Flush beforewards (we like our hygiene)
         self.testconn.flushdb()
+        self.conn = RQConnection(self.testconn)
 
     def tearDown(self):
         # Flush afterwards

@@ -381,6 +381,7 @@ class Job(object):
         self._dependency_ids = as_text(obj.get('dependency_ids', '')).split(',')
         self.ttl = int(obj.get('ttl')) if obj.get('ttl') else None
         self.meta = unpickle(obj.get('meta')) if obj.get('meta') else {}
+        return self
 
     def to_dict(self):
         """Returns a serialization of the current job instance"""
@@ -433,7 +434,7 @@ class Job(object):
         cancellation.
         """
         from rq.queue import Queue
-        with self._connection.pipeline():
+        with self._connection._pipeline():
             if self.origin:
                 queue = Queue(name=self.origin, connection=self._connection)
                 queue.remove(self)

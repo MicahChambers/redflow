@@ -18,8 +18,6 @@ class CustomJob(Job):
 
 
 class TestQueue(RQTestCase):
-    def setUp(self):
-        self.conn = RQConnection(find_empty_redis_database())
 
     def test_create_queue(self):
         """Creating queues."""
@@ -59,9 +57,9 @@ class TestQueue(RQTestCase):
         """Emptying a queue deletes the associated job objects"""
         q = Queue('example', connection=self.conn)
         job = q.enqueue(say_hello)
-        self.assertTrue(Job.exists(job.id))
+        self.assertIsNotNone(self.conn.get_job(job.id))
         q.empty()
-        self.assertFalse(Job.exists(job.id))
+        self.assertIsNone(self.conn.get_job(job.id))
 
     def test_queue_is_empty(self):
         """Detecting empty queues."""
@@ -130,14 +128,10 @@ class TestQueue(RQTestCase):
 
     def test_enqueue_sets_metadata(self):
         """Enqueueing job onto queues modifies meta data."""
-        q = Queue()
-        job = Job.create(func=say_hello, args=('Nick',), kwargs=dict(foo='bar'))
-
-        # Preconditions
-        self.assertIsNone(job.enqueued_at)
+        q = Queue(connection=self.conn)
 
         # Action
-        q.enqueue_job(job)
+        job = q.enqueue_call(func=say_hello, args=('Nick',), kwargs=dict(foo='bar'))
 
         # Postconditions
         self.assertIsNotNone(job.enqueued_at)
@@ -228,11 +222,11 @@ class TestQueue(RQTestCase):
         fooq = Queue('foo', connection=self.conn)
         barq = Queue('bar', connection=self.conn)
 
-        self.assertEqual(Queue.dequeue_any([fooq, barq], None), None)
+        self.assertEqual(self.conn.dequeue_any([fooq, barq], None), None)
 
         # Enqueue a single item
         barq.enqueue(say_hello)
-        job, queue = Queue.dequeue_any([fooq, barq], None)
+        job, queue = self.conn.dequeue_any([fooq, barq], None)
         self.assertEqual(job.func, say_hello)
         self.assertEqual(queue, barq)
 
@@ -240,14 +234,14 @@ class TestQueue(RQTestCase):
         barq.enqueue(say_hello, 'for Bar')
         fooq.enqueue(say_hello, 'for Foo')
 
-        job, queue = Queue.dequeue_any([fooq, barq], None)
+        job, queue = self.conn.dequeue_any([fooq, barq], None)
         self.assertEqual(queue, fooq)
         self.assertEqual(job.func, say_hello)
         self.assertEqual(job.origin, fooq.name)
         self.assertEqual(job.args[0], 'for Foo',
                          'Foo should be dequeued first.')
 
-        job, queue = Queue.dequeue_any([fooq, barq], None)
+        job, queue = self.conn.dequeue_any([fooq, barq], None)
         self.assertEqual(queue, barq)
         self.assertEqual(job.func, say_hello)
         self.assertEqual(job.origin, barq.name)
@@ -263,8 +257,12 @@ class TestQueue(RQTestCase):
 
         # Dequeue simply ignores the missing job and returns None
         self.assertEqual(q.count, 1)
-        self.assertEqual(Queue.dequeue_any([Queue(connection=self.conn), Queue('low', connection=self.conn)], None),  # noqa
-                None)
+
+        queues = [
+            Queue(connection=self.conn),
+            Queue('low', connection=self.conn)
+        ]
+        self.assertEqual(self.conn.dequeue_any(queues, None),  None)
         self.assertEqual(q.count, 0)
 
     def test_enqueue_sets_status(self):
@@ -313,15 +311,15 @@ class TestQueue(RQTestCase):
         q3 = Queue('third-queue', connection=self.conn)
 
         # Ensure a queue is added only once a job is enqueued
-        self.assertEqual(len(Queue.all()), 0)
+        self.assertEqual(len(self.conn.get_queues()), 0)
         q1.enqueue(say_hello)
-        self.assertEqual(len(Queue.all()), 1)
+        self.assertEqual(len(self.conn.get_queues()), 1)
 
         # Ensure this holds true for multiple queues
         q2.enqueue(say_hello)
         q3.enqueue(say_hello)
-        names = [q.name for q in Queue.all()]
-        self.assertEqual(len(Queue.all()), 3)
+        names = [q.name for q in self.conn.get_queues()]
+        self.assertEqual(len(self.conn.get_queues()), 3)
 
         # Verify names
         self.assertTrue('first-queue' in names)
@@ -329,203 +327,202 @@ class TestQueue(RQTestCase):
         self.assertTrue('third-queue' in names)
 
         # Now empty two queues
-        w = Worker([q2, q3])
+        import ipdb; ipdb.set_trace()
+        w = Worker([q2, q3], connection=self.conn)
         w.work(burst=True)
 
         # Queue.all() should still report the empty queues
-        self.assertEqual(len(Queue.all()), 3)
+        self.assertEqual(len(self.conn.get_queues()), 3)
 
-    def test_enqueue_dependents(self):
-        """Enqueueing dependent jobs pushes all jobs in the depends set to the queue
-        and removes them from DeferredJobQueue."""
-        q = Queue()
-        parent_job = Job.create(func=say_hello)
-        parent_job.save()
-        job_1 = q.enqueue(say_hello, depends_on=parent_job)
-        job_2 = q.enqueue(say_hello, depends_on=parent_job)
-
-        registry = DeferredJobRegistry(q.name, connection=self.testconn)
-        self.assertEqual(
-            set(registry.get_job_ids()),
-            set([job_1.id, job_2.id])
-        )
-        # After dependents is enqueued, job_1 and job_2 should be in queue
-        self.assertEqual(q.job_ids, [])
-        q.enqueue_dependents(parent_job)
-        self.assertEqual(set(q.job_ids), set([job_2.id, job_1.id]))
-        self.assertFalse(self.testconn.exists(parent_job.dependents_key))
-
-        # DeferredJobRegistry should also be empty
-        self.assertEqual(registry.get_job_ids(), [])
-
-    def test_enqueue_dependents_on_multiple_queues(self):
-        """Enqueueing dependent jobs on multiple queues pushes jobs in the queues
-        and removes them from DeferredJobRegistry for each different queue."""
-        q_1 = Queue("queue_1")
-        q_2 = Queue("queue_2")
-        parent_job = Job.create(func=say_hello)
-        parent_job.save()
-        job_1 = q_1.enqueue(say_hello, depends_on=parent_job)
-        job_2 = q_2.enqueue(say_hello, depends_on=parent_job)
-
-        # Each queue has its own DeferredJobRegistry
-        registry_1 = DeferredJobRegistry(q_1.name, connection=self.testconn)
-        self.assertEqual(
-            set(registry_1.get_job_ids()),
-            set([job_1.id])
-        )
-        registry_2 = DeferredJobRegistry(q_2.name, connection=self.testconn)
-        self.assertEqual(
-            set(registry_2.get_job_ids()),
-            set([job_2.id])
-        )
-
-        # After dependents is enqueued, job_1 on queue_1 and
-        # job_2 should be in queue_2
-        self.assertEqual(q_1.job_ids, [])
-        self.assertEqual(q_2.job_ids, [])
-        q_1.enqueue_dependents(parent_job)
-        q_2.enqueue_dependents(parent_job)
-        self.assertEqual(set(q_1.job_ids), set([job_1.id]))
-        self.assertEqual(set(q_2.job_ids), set([job_2.id]))
-        self.assertFalse(self.testconn.exists(parent_job.dependents_key))
-
-        # DeferredJobRegistry should also be empty
-        self.assertEqual(registry_1.get_job_ids(), [])
-        self.assertEqual(registry_2.get_job_ids(), [])
-
-    def test_enqueue_job_with_dependency(self):
-        """Jobs are enqueued only when their dependencies are finished."""
-        # Job with unfinished dependency is not immediately enqueued
-        parent_job = Job.create(func=say_hello)
-        q = Queue()
-        job = q.enqueue_call(say_hello, depends_on=parent_job)
-        self.assertEqual(q.job_ids, [])
-        self.assertEqual(job.get_status(), JobStatus.DEFERRED)
-
-        # Jobs dependent on finished jobs are immediately enqueued
-        parent_job.set_status(JobStatus.FINISHED)
-        parent_job.save()
-        job = q.enqueue_call(say_hello, depends_on=parent_job)
-        self.assertEqual(q.job_ids, [job.id])
-        self.assertEqual(job.timeout, Queue.DEFAULT_TIMEOUT)
-        self.assertEqual(job.get_status(), JobStatus.QUEUED)
-
-    def test_enqueue_job_with_dependency_by_id(self):
-        """Can specify job dependency with job object or job id."""
-        parent_job = Job.create(func=say_hello)
-
-        q = Queue()
-        q.enqueue_call(say_hello, depends_on=parent_job.id)
-        self.assertEqual(q.job_ids, [])
-
-        # Jobs dependent on finished jobs are immediately enqueued
-        parent_job.set_status(JobStatus.FINISHED)
-        parent_job.save()
-        job = q.enqueue_call(say_hello, depends_on=parent_job.id)
-        self.assertEqual(q.job_ids, [job.id])
-        self.assertEqual(job.timeout, Queue.DEFAULT_TIMEOUT)
-
-    def test_enqueue_job_with_dependency_and_timeout(self):
-        """Jobs remember their timeout when enqueued as a dependency."""
-        # Job with unfinished dependency is not immediately enqueued
-        parent_job = Job.create(func=say_hello)
-        q = Queue()
-        job = q.enqueue_call(say_hello, depends_on=parent_job, timeout=123)
-        self.assertEqual(q.job_ids, [])
-        self.assertEqual(job.timeout, 123)
-
-        # Jobs dependent on finished jobs are immediately enqueued
-        parent_job.set_status(JobStatus.FINISHED)
-        parent_job.save()
-        job = q.enqueue_call(say_hello, depends_on=parent_job, timeout=123)
-        self.assertEqual(q.job_ids, [job.id])
-        self.assertEqual(job.timeout, 123)
-
-
-class TestFailedQueue(RQTestCase):
-    def test_requeue_job(self):
-        """Requeueing existing jobs."""
-        job = Job.create(func=div_by_zero, args=(1, 2, 3))
-        job.origin = 'fake'
-        job.save()
-        get_failed_queue().quarantine(job, Exception('Some fake error'))  # noqa
-
-        self.assertEqual(Queue.all(), [get_failed_queue()])  # noqa
-        self.assertEqual(get_failed_queue().count, 1)
-
-        get_failed_queue().requeue(job.id)
-
-        self.assertEqual(get_failed_queue().count, 0)
-        self.assertEqual(Queue('fake').count, 1)
-
-    def test_requeue_nonfailed_job_fails(self):
-        """Requeueing non-failed jobs raises error."""
-        q = Queue()
-        job = q.enqueue(say_hello, 'Nick', foo='bar')
-
-        # Assert that we cannot requeue a job that's not on the failed queue
-        with self.assertRaises(InvalidJobOperationError):
-            get_failed_queue().requeue(job.id)
-
-    def test_quarantine_preserves_timeout(self):
-        """Quarantine preserves job timeout."""
-        job = Job.create(func=div_by_zero, args=(1, 2, 3))
-        job.origin = 'fake'
-        job.timeout = 200
-        job.save()
-        get_failed_queue().quarantine(job, Exception('Some fake error'))
-
-        self.assertEqual(job.timeout, 200)
-
-    def test_requeueing_preserves_timeout(self):
-        """Requeueing preserves job timeout."""
-        job = Job.create(func=div_by_zero, args=(1, 2, 3))
-        job.origin = 'fake'
-        job.timeout = 200
-        job.save()
-        get_failed_queue().quarantine(job, Exception('Some fake error'))
-        get_failed_queue().requeue(job.id)
-
-        job = Job.fetch(job.id)
-        self.assertEqual(job.timeout, 200)
-
-    def test_requeue_sets_status_to_queued(self):
-        """Requeueing a job should set its status back to QUEUED."""
-        job = Job.create(func=div_by_zero, args=(1, 2, 3))
-        job.save()
-        get_failed_queue().quarantine(job, Exception('Some fake error'))
-        get_failed_queue().requeue(job.id)
-
-        job = Job.fetch(job.id)
-        self.assertEqual(job.get_status(), JobStatus.QUEUED)
-
-    def test_enqueue_preserves_result_ttl(self):
-        """Enqueueing persists result_ttl."""
-        q = Queue()
-        job = q.enqueue(div_by_zero, args=(1, 2, 3), result_ttl=10)
-        self.assertEqual(job.result_ttl, 10)
-        job_from_queue = Job.fetch(job.id, connection=self.testconn)
-        self.assertEqual(int(job_from_queue.result_ttl), 10)
-
-    def test_async_false(self):
-        """Job executes and cleaned up immediately if async=False."""
-        q = Queue(async=False)
-        job = q.enqueue(some_calculation, args=(2, 3))
-        self.assertEqual(job.return_value, 6)
-        self.assertNotEqual(self.testconn.ttl(job.key), -1)
-
-    def test_custom_job_class(self):
-        """Ensure custom job class assignment works as expected."""
-        q = Queue(job_class=CustomJob)
-        self.assertEqual(q.job_class, CustomJob)
-
-    def test_skip_queue(self):
-        """Ensure the skip_queue option functions"""
-        q = Queue('foo')
-        job1 = q.enqueue(say_hello)
-        job2 = q.enqueue(say_hello)
-        assert q.dequeue() == job1
-        skip_job = q.enqueue(say_hello, at_front=True)
-        assert q.dequeue() == skip_job
-        assert q.dequeue() == job2
+#    def test_enqueue_dependents(self):
+#        """Enqueueing dependent jobs pushes all jobs in the depends set to the queue
+#        and removes them from DeferredJobQueue."""
+#        q = Queue()
+#        parent_job = Job(connection=self.conn).create(func=say_hello)
+#        parent_job.save()
+#        job_1 = q.enqueue(say_hello, depends_on=parent_job)
+#        job_2 = q.enqueue(say_hello, depends_on=parent_job)
+#
+#        registry = DeferredJobRegistry(q.name, connection=self.conn)
+#        self.assertEqual(
+#            set(registry.get_job_ids()),
+#            set([job_1.id, job_2.id])
+#        )
+#        # After dependents is enqueued, job_1 and job_2 should be in queue
+#        self.assertEqual(q.job_ids, [])
+#        q.enqueue_dependents(parent_job)
+#        self.assertEqual(set(q.job_ids), set([job_2.id, job_1.id]))
+#        self.assertFalse(self.testconn.exists(parent_job.dependents_key))
+#
+#        # DeferredJobRegistry should also be empty
+#        self.assertEqual(registry.get_job_ids(), [])
+#
+#    def test_enqueue_dependents_on_multiple_queues(self):
+#        """Enqueueing dependent jobs on multiple queues pushes jobs in the queues
+#        and removes them from DeferredJobRegistry for each different queue."""
+#        q_1 = Queue("queue_1")
+#        q_2 = Queue("queue_2")
+#        parent_job = Job(connection=self.testconn).create(func=say_hello)
+#        parent_job.save()
+#        job_1 = q_1.enqueue(say_hello, depends_on=parent_job)
+#        job_2 = q_2.enqueue(say_hello, depends_on=parent_job)
+#
+#        # Each queue has its own DeferredJobRegistry
+#        registry_1 = DeferredJobRegistry(q_1.name, connection=self.testconn)
+#        self.assertEqual(
+#            set(registry_1.get_job_ids()),
+#            set([job_1.id])
+#        )
+#        registry_2 = DeferredJobRegistry(q_2.name, connection=self.testconn)
+#        self.assertEqual(
+#            set(registry_2.get_job_ids()),
+#            set([job_2.id])
+#        )
+#
+#        # After dependents is enqueued, job_1 on queue_1 and
+#        # job_2 should be in queue_2
+#        self.assertEqual(q_1.job_ids, [])
+#        self.assertEqual(q_2.job_ids, [])
+#        q_1.enqueue_dependents(parent_job)
+#        q_2.enqueue_dependents(parent_job)
+#        self.assertEqual(set(q_1.job_ids), set([job_1.id]))
+#        self.assertEqual(set(q_2.job_ids), set([job_2.id]))
+#        self.assertFalse(self.testconn.exists(parent_job.dependents_key))
+#
+#        # DeferredJobRegistry should also be empty
+#        self.assertEqual(registry_1.get_job_ids(), [])
+#        self.assertEqual(registry_2.get_job_ids(), [])
+#
+#    def test_enqueue_job_with_dependency(self):
+#        """Jobs are enqueued only when their dependencies are finished."""
+#        # Job with unfinished dependency is not immediately enqueued
+#        parent_job = Job(connection=self.testconn).create(func=say_hello)
+#        q = Queue()
+#        job = q.enqueue_call(say_hello, depends_on=parent_job)
+#        self.assertEqual(q.job_ids, [])
+#        self.assertEqual(job.get_status(), JobStatus.DEFERRED)
+#
+#        # Jobs dependent on finished jobs are immediately enqueued
+#        parent_job.set_status(JobStatus.FINISHED)
+#        parent_job.save()
+#        job = q.enqueue_call(say_hello, depends_on=parent_job)
+#        self.assertEqual(q.job_ids, [job.id])
+#        self.assertEqual(job.timeout, Queue.DEFAULT_TIMEOUT)
+#        self.assertEqual(job.get_status(), JobStatus.QUEUED)
+#
+#    def test_enqueue_job_with_dependency_by_id(self):
+#        """Can specify job dependency with job object or job id."""
+#        parent_job = Job(connection=self.testconn).create(func=say_hello)
+#
+#        q = Queue()
+#        q.enqueue_call(say_hello, depends_on=parent_job.id)
+#        self.assertEqual(q.job_ids, [])
+#
+#        # Jobs dependent on finished jobs are immediately enqueued
+#        parent_job.set_status(JobStatus.FINISHED)
+#        parent_job.save()
+#        job = q.enqueue_call(say_hello, depends_on=parent_job.id)
+#        self.assertEqual(q.job_ids, [job.id])
+#        self.assertEqual(job.timeout, Queue.DEFAULT_TIMEOUT)
+#
+#    def test_enqueue_job_with_dependency_and_timeout(self):
+#        """Jobs remember their timeout when enqueued as a dependency."""
+#        # Job with unfinished dependency is not immediately enqueued
+#        parent_job = Job(connection=self.testconn).create(func=say_hello)
+#        q = Queue()
+#        job = q.enqueue_call(say_hello, depends_on=parent_job, timeout=123)
+#        self.assertEqual(q.job_ids, [])
+#        self.assertEqual(job.timeout, 123)
+#
+#        # Jobs dependent on finished jobs are immediately enqueued
+#        parent_job.set_status(JobStatus.FINISHED)
+#        parent_job.save()
+#        job = q.enqueue_call(say_hello, depends_on=parent_job, timeout=123)
+#        self.assertEqual(q.job_ids, [job.id])
+#        self.assertEqual(job.timeout, 123)
+#
+#
+#class TestFailedQueue(RQTestCase):
+#    def test_requeue_job(self):
+#        """Requeueing existing jobs."""
+#        job = Job(connection=self.testconn).create(func=div_by_zero, args=(1, 2, 3))
+#        job.origin = 'fake'
+#        job.save()
+#        fq = self.conn.get_failed_queue()
+#        fq.quarantine(job, Exception('Some fake error'))
+#
+#        self.assertEqual(self.conn.get_queues(), [self.conn.get_failed_queue()])
+#        self.assertEqual(self.conn.get_failed_queue().count, 1)
+#
+#        import ipdb; ipdb.set_trace()
+#        fq = self.conn.get_failed_queue()
+#        fq.requeue(job.id)
+#
+#        self.assertEqual(self.conn.get_failed_queue().count, 0)
+#        self.assertEqual(Queue('fake').count, 1)
+#
+#    def test_requeue_nonfailed_job_fails(self):
+#        """Requeueing non-failed jobs raises error."""
+#        q = Queue()
+#        job = q.enqueue(say_hello, 'Nick', foo='bar')
+#
+#        # Assert that we cannot requeue a job that's not on the failed queue
+#        with self.assertRaises(InvalidJobOperationError):
+#            self.conn.get_failed_queue().requeue(job.id)
+#
+#    def test_quarantine_preserves_timeout(self):
+#        """Quarantine preserves job timeout."""
+#        job = Job(connection=self.testconn).create(func=div_by_zero, args=(1, 2, 3))
+#        job.origin = 'fake'
+#        job.timeout = 200
+#        job.save()
+#        self.conn.get_failed_queue().quarantine(job, Exception('Some fake error'))
+#
+#        self.assertEqual(job.timeout, 200)
+#
+#    def test_requeueing_preserves_timeout(self):
+#        """Requeueing preserves job timeout."""
+#        job = Job(connection=self.testconn).create(func=div_by_zero, args=(1, 2, 3))
+#        job.origin = 'fake'
+#        job.timeout = 200
+#        job.save()
+#        self.conn.get_failed_queue().quarantine(job, Exception('Some fake error'))
+#        self.conn.get_failed_queue().requeue(job.id)
+#
+#        job = Job(job.id).refresh()
+#        self.assertEqual(job.timeout, 200)
+#
+#    def test_requeue_sets_status_to_queued(self):
+#        """Requeueing a job should set its status back to QUEUED."""
+#        job = Job(connection=self.testconn).create(func=div_by_zero, args=(1, 2, 3))
+#        job.save()
+#        self.conn.get_failed_queue().quarantine(job, Exception('Some fake error'))
+#        self.conn.get_failed_queue().requeue(job.id)
+#
+#        job = Job(job.id, connection=self.testconn).refresh()
+#        self.assertEqual(job.get_status(), JobStatus.QUEUED)
+#
+#    def test_enqueue_preserves_result_ttl(self):
+#        """Enqueueing persists result_ttl."""
+#        q = Queue(connection=self.testconn)
+#        job = q.enqueue(div_by_zero, args=(1, 2, 3), result_ttl=10)
+#        self.assertEqual(job.result_ttl, 10)
+#        job_from_queue = Job(job.id, connection=self.testconn).refresh()
+#        self.assertEqual(int(job_from_queue.result_ttl), 10)
+#
+#    def test_async_false(self):
+#        """Job executes and cleaned up immediately if async=False."""
+#        q = Queue(async=False)
+#        job = q.enqueue(some_calculation, args=(2, 3))
+#        self.assertEqual(job.return_value, 6)
+#        self.assertNotEqual(self.testconn.ttl(job.key), -1)
+#
+#    def test_skip_queue(self):
+#        """Ensure the skip_queue option functions"""
+#        q = Queue('foo')
+#        job1 = q.enqueue(say_hello)
+#        job2 = q.enqueue(say_hello)
+#        assert q.dequeue() == job1
+#        skip_job = q.enqueue(say_hello, at_front=True)
+#        assert q.dequeue() == skip_job
+#        assert q.dequeue() == job2

@@ -128,6 +128,24 @@ class Queue(object):
         else:
             self._connection._rpush(self.key, job_id)
 
+    def _enqueue_job(self, job):
+        """
+        It is much like `.enqueue()`, except that it takes the function's args
+        and kwargs as explicit arguments.  Any kwargs passed to this function
+        contain options for RQ itself.
+        """
+        # Make sure the queue actually exists
+        if self._async:
+            self._connection._sadd(REDIS_QUEUES_KEY, self.key)
+            job._attempt_enqueue()
+        else:
+            job.perform()
+            job.set_status(JobStatus.FINISHED)
+            job.save()
+            job.cleanup(DEFAULT_RESULT_TTL)
+
+        return job
+
     def enqueue_call(self, func, args=None, kwargs=None, timeout=None,
                      result_ttl=None, ttl=None, description=None,
                      depends_on=None, at_front=False, meta=None):
@@ -149,16 +167,7 @@ class Queue(object):
                    meta=meta)
         job.save()
 
-        # Make sure the queue actually exists
-        if self._async:
-            self._connection._sadd(REDIS_QUEUES_KEY, self.key)
-            job._attempt_enqueue()
-        else:
-            job.perform()
-            job.set_status(JobStatus.FINISHED)
-            job.save()
-            job.cleanup(DEFAULT_RESULT_TTL)
-
+        self._enqueue_job(job)
         return job
 
     def enqueue(self, f, *args, **kwargs):
@@ -202,11 +211,14 @@ class Queue(object):
                                  meta=meta)
 
     def pop_job_id(self):
-        """Pops a given job ID from this Redis queue."""
-        return as_text(self._connection.lpop(self.key))
+        """
+        Pops a given job ID from this Redis queue.
+        """
+        return as_text(self._connection._lpop(self.key))
 
     def dequeue(self):
-        """Dequeues the front-most job from this queue.
+        """
+        Dequeues the front-most job from this queue.
 
         Returns a Job instance, which can be executed or inspected.
         """
@@ -216,9 +228,11 @@ class Queue(object):
                 return None
             try:
                 job = self._connection.get_job(job_id)
-            except NoSuchJobError as e:
+
                 # Silently pass on jobs that don't exist (anymore),
-                continue
+                if not job:
+                    continue
+
             except UnpickleError as e:
                 # Attach queue information on the exception for improved error
                 # reporting
@@ -257,17 +271,13 @@ class FailedQueue(Queue):
         """
         Puts the given Job in quarantine (i.e. put it on the failed queue)
         """
+        # Add Queue key set
+        self._connection._sadd(REDIS_QUEUES_KEY, self.key)
+        self.push_job_id(job.id)
 
-        with self._connection._pipeline() as pipeline:
-            # Add Queue key set
-            self._connection.sadd(REDIS_QUEUES_KEY, self.key)
-
-            job.ended_at = utcnow()
-            job.exc_info = exc_info
-            job.save(pipeline=pipeline)
-
-            self.push_job_id(job.id, pipeline=pipeline)
-            pipeline.execute()
+        job.ended_at = utcnow()
+        job.exc_info = exc_info
+        job.save()
 
         return job
 
@@ -281,11 +291,15 @@ class FailedQueue(Queue):
             self.remove(job_id)
             return
 
-        # Delete it from the failed queue (raise an error if that failed)
+        # Delete it from the failed queue (raise an error if that failed) This
+        # doesn't have race condition, since only one process will successfuly
+        # remove this, on the downside, if the thread dies the job will be lost
+        # TODO make move atomic
         if self.remove(job) == 0:
             raise InvalidJobOperationError('Cannot requeue non-failed jobs')
 
-        job.set_status(JobStatus.QUEUED)
+        # enqueue expects the job to be deferrer to prevent race conditions
+        job.set_status(JobStatus.DEFERRED)
         job.exc_info = None
         q = Queue(job.origin, connection=self._connection)
         q.enqueue_job(job)
