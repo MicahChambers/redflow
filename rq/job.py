@@ -624,3 +624,11 @@ class Job(object):
             child.refresh()
             prev_status, new_status = child._try_enqueue_job()
 
+    def requeue_job(self):
+        """Requeues the job with the given job ID.  If no such job exists, just
+        remove the job ID from the failed queue, otherwise the job ID should refer
+        to a failed job (i.e. it should be on the failed queue).
+        """
+        fq = self._connection.get_failed_queue()
+        fq.requeue(self.id)
+

@@ -2,7 +2,7 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-from rq import Connection, Queue
+from rq import RQConnection, Queue
 
 from tests import find_empty_redis_database, RQTestCase
 from tests.fixtures import do_nothing
@@ -13,28 +13,18 @@ def new_connection():
 
 
 class TestConnectionInheritance(RQTestCase):
-    def test_connection_detection(self):
-        """Automatic detection of the connection."""
-        q = Queue()
-        self.assertEqual(q.connection, self.testconn)
 
-    def test_connection_stacking(self):
-        """Connection stacking."""
-        conn1 = new_connection()
-        conn2 = new_connection()
+    def test_init(self):
+        """ Pinging redis server should work """
+        conn = RQConnection(new_connection())
+        self.assertTrue(conn.ping())
 
-        with Connection(conn1):
-            q1 = Queue()
-            with Connection(conn2):
-                q2 = Queue()
-        self.assertNotEqual(q1.connection, q2.connection)
+    def test_get_no_queues(self):
+        """ Test getting queues when none are there """
+        conn = RQConnection(new_connection())
+        self.assertEqual(conn.get_queues(), [])
 
-    def test_connection_pass_thru(self):
-        """Connection passed through from queues to jobs."""
-        q1 = Queue()
-        with Connection(new_connection()):
-            q2 = Queue()
-        job1 = q1.enqueue(do_nothing)
-        job2 = q2.enqueue(do_nothing)
-        self.assertEqual(q1.connection, job1.connection)
-        self.assertEqual(q2.connection, job2.connection)
+    def test_get_no_workers(self):
+        """ Test getting workers when none are there """
+        conn = RQConnection(new_connection())
+        self.assertEqual(conn.get_workers(), [])

@@ -14,6 +14,7 @@ from .worker import Worker
 from .exceptions import NoSuchJobError, UnpickleError
 from .compat import as_text
 from .exceptions import DequeueTimeout
+from .queue import FailedQueue
 
 
 class NoRedisConnectionException(Exception):
@@ -42,6 +43,12 @@ class RQConnection(object):
             self._redis_conn = conn
         else:
             raise Exception("Unknown connection type provided")
+
+    def ping(self):
+        """
+        Check that the connection is active
+        """
+        return self._redis_conn.ping()
 
     def get_queue(self, name=None, default_timeout=None, async=True,
                   job_class=None):
@@ -86,8 +93,6 @@ class RQConnection(object):
                              for queue in queues.split(',')]
         return worker
 
-
-
     def get_queues(self):
         """
         Returns an iterable of all Queues.
@@ -111,17 +116,8 @@ class RQConnection(object):
             return None
         return job
 
-    def requeue_job(self, job_id):
-        """Requeues the job with the given job ID.  If no such job exists, just
-        remove the job ID from the failed queue, otherwise the job ID should refer
-        to a failed job (i.e. it should be on the failed queue).
-        """
-        fq = self.get_failed_queue()
-        fq.requeue(job_id)
-
     def get_failed_queue(self):
         """Returns a handle to the special failed queue."""
-        from rq.queue import FailedQueue
         return FailedQueue(connection=self)
 
     def dequeue_any(self, queues, timeout):
@@ -234,7 +230,7 @@ class RQConnection(object):
             swapped_args = [(key, score) for score, key in args]
             return self._redis_conn(name, *swapped_args, **kwargs)
 
-    def __getattr__(self, attr_name, defvalue):
+    def __getattr__(self, attr_name, defvalue=None):
         """
         Passes through unmodified redis functions if possible
         """
