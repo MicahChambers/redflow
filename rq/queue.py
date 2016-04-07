@@ -97,13 +97,13 @@ class Queue(object):
     @property
     def count(self):
         """Returns a count of all messages in the queue."""
-        return self._connection._llen(self.key)
+        return self._connection._redis_conn.llen(self.key)
 
     def remove(self, job_or_id):
         """Removes Job from queue, accepts either a Job instance or ID."""
         job_id = job_or_id.id if isinstance(job_or_id, Job) else job_or_id
 
-        return self._connection._lrem(self.key, 1, job_id)
+        return self._connection._redis_conn.lrem(self.key, 1, job_id)
 
     def compact(self):
         """
@@ -112,21 +112,21 @@ class Queue(object):
         """
         COMPACT_QUEUE = 'rq:queue:_compact:{0}'.format(uuid.uuid4())
 
-        self._connection._rename(self.key, COMPACT_QUEUE)
+        self._connection._redis_conn.rename(self.key, COMPACT_QUEUE)
         while True:
-            job_id = as_text(self._connection._lpop(COMPACT_QUEUE))
+            job_id = as_text(self._connection._redis_conn.lpop(COMPACT_QUEUE))
             if job_id is None:
                 break
             if self._connection.get_job(job_id) is not None:
-                self._connection._rpush(self.key, job_id)
+                self._connection._redis_conn.rpush(self.key, job_id)
 
     def push_job_id(self, job_id, at_front=False):
         """Pushes a job ID on the corresponding Redis queue.
         'at_front' allows you to push the job onto the front instead of the back of the queue"""
         if at_front:
-            self._connection._lpush(self.key, job_id)
+            self._connection._redis_conn.lpush(self.key, job_id)
         else:
-            self._connection._rpush(self.key, job_id)
+            self._connection._redis_conn.rpush(self.key, job_id)
 
     def _enqueue_job(self, job):
         """
@@ -136,7 +136,7 @@ class Queue(object):
         """
         # Make sure the queue actually exists
         if self._async:
-            self._connection._sadd(REDIS_QUEUES_KEY, self.key)
+            self._connection._redis_conn.sadd(REDIS_QUEUES_KEY, self.key)
             job._attempt_enqueue()
         else:
             job.perform()
@@ -214,7 +214,7 @@ class Queue(object):
         """
         Pops a given job ID from this Redis queue.
         """
-        return as_text(self._connection._lpop(self.key))
+        return as_text(self._connection._redis_conn.lpop(self.key))
 
     def dequeue(self):
         """
@@ -272,7 +272,7 @@ class FailedQueue(Queue):
         Puts the given Job in quarantine (i.e. put it on the failed queue)
         """
         # Add Queue key set
-        self._connection._sadd(REDIS_QUEUES_KEY, self.key)
+        self._connection._redis_conn.sadd(REDIS_QUEUES_KEY, self.key)
         self.push_job_id(job.id)
 
         job.ended_at = utcnow()

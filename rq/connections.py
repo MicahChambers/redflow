@@ -35,12 +35,10 @@ class RQConnection(object):
     def __init__(self, conn):
         if conn is None:
             self._redis_conn = StrictRedis()
-            self._using_strict_redis = True
+        elif isinstance(conn, StrictRedis):
+            self._redis_conn = conn
         elif isinstance(conn, Redis):
             raise Exception("Connection Redis is not supported, use StrictRedis ")
-        elif isinstance(conn, StrictRedis):
-            self._using_strict_redis = True
-            self._redis_conn = conn
         else:
             raise Exception("Unknown connection type provided")
 
@@ -69,7 +67,7 @@ class RQConnection(object):
         """
         Returns an iterable of all Workers.
         """
-        reported_working = self._smembers(REDIS_WORKERS_KEY)
+        reported_working = self._redis_conn.smembers(REDIS_WORKERS_KEY)
         workers = [self.get_worker(worker_key_to_name(as_text(key)))
                    for key in reported_working]
         return compact(workers)
@@ -97,7 +95,7 @@ class RQConnection(object):
         Returns an iterable of all Queues.
         """
         lst = []
-        for rq_key in self._smembers(REDIS_QUEUES_KEY):
+        for rq_key in self._redis_conn.smembers(REDIS_QUEUES_KEY):
             if rq_key:  # TODO does this ever evaluate to False?
                 q = self.get_queue(queue_key_to_name(rq_key))
                 lst.append(q)
@@ -210,37 +208,6 @@ class RQConnection(object):
                 if blob is not None:
                     return queue_key, blob
             return None
-
-    def _setex(self, name, value, time):
-        return self._redis_conn(name=name, value=value, time=time)
-
-    def _lrem(self, name, count, value):
-        if self._using_strict_redis:
-            return self._redis_conn.lrem(name=name, count=count, value=value)
-        else:
-            return self._redis_conn.lrem(name=name, num=count, value=value)
-
-    def _zadd(self, name, *args, **kwargs):
-        """
-        Intermediate for
-        """
-        if self._using_strict_redis:
-            # The redis connection is struct
-            return self._redis_conn.zadd(name, *args, **kwargs)
-        else:
-            # swap order so that order is correct for non-strict redis conn
-            swapped_args = [(key, score) for score, key in args]
-            return self._redis_conn.zadd(name, *swapped_args, **kwargs)
-
-    def __getattr__(self, attr_name):
-        """
-        Passes through unmodified redis functions if possible
-        """
-        if attr_name.startswith('_') and hasattr(self._redis_conn, attr_name[1:]):
-            return getattr(self._redis_conn, attr_name[1:])
-        else:
-            raise AttributeError('{} has no attribute "{}"'.format(type(self),
-                                                                   attr_name))
 
 __all__ = ['RQConnection']
 
