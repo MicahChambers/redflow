@@ -2,14 +2,16 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
+from functools import partial
 import uuid
 
 from .defaults import DEFAULT_RESULT_TTL
 from .compat import as_text, string_types, total_ordering
-from .exceptions import (InvalidJobOperationError, NoSuchJobError, UnpickleError)
+from .exceptions import (InvalidJobOperationError, UnpickleError)
 from .job import Job, JobStatus
-from .utils import utcnow
-from .keys import queue_name_to_key, REDIS_QUEUES_KEY
+from .utils import utcnow, _requeue, _attempt_enqueue, _clean_queue
+from .keys import (key_for_queue, REDIS_QUEUES_KEY, key_for_job,
+                   key_for_dependents)
 
 def compact(lst):
     return [item for item in lst if item is not None]
@@ -31,7 +33,7 @@ class Queue(object):
         self.name = name
         self._default_timeout = default_timeout
         self._async = async
-        self._key = queue_name_to_key(name)
+        self._key = key_for_queue(name)
 
     def __len__(self):
         return self.count
@@ -40,30 +42,20 @@ class Queue(object):
         yield self
 
     @property
+    def redis(self):
+        return self._connection._redis_conn
+
+    @property
     def key(self):
         """Returns the Redis key for this Queue."""
         return self._key
 
     def empty(self):
-        script = b"""
-            local prefix = "rq:job:"
-            local q = KEYS[1]
-            local count = 0
-            while true do
-                local job_id = redis.call("lpop", q)
-                if job_id == false then
-                    break
-                end
+        callback = partial(_clean_queue, queue_key=self.key)
 
-                -- Delete the relevant keys
-                redis.call("del", prefix..job_id)
-                redis.call("del", prefix..job_id..":dependents")
-                count = count + 1
-            end
-            return count
-        """
-        script = self._connection._register_script(script)
-        return script(keys=[self.key])
+        # Only need to watch the main queue, since everything sitting in the
+        # queue should be static (first action of any job work is to pop off)
+        return self.redis.transaction(callback, [self.key])
 
     def is_empty(self):
         """Returns whether the current queue is empty."""
@@ -77,7 +69,7 @@ class Queue(object):
         else:
             end = length
         return [as_text(job_id) for job_id in
-                self._connection._lrange(self.key, start, end)]
+                self.redis.lrange(self.key, start, end)]
 
     def get_jobs(self, offset=0, length=-1):
         """Returns a slice of jobs in the queue."""
@@ -97,13 +89,13 @@ class Queue(object):
     @property
     def count(self):
         """Returns a count of all messages in the queue."""
-        return self._connection._redis_conn.llen(self.key)
+        return self.redis.llen(self.key)
 
     def remove(self, job_or_id):
         """Removes Job from queue, accepts either a Job instance or ID."""
         job_id = job_or_id.id if isinstance(job_or_id, Job) else job_or_id
 
-        return self._connection._redis_conn.lrem(self.key, 1, job_id)
+        return self.redis.lrem(self.key, 1, job_id)
 
     def compact(self):
         """
@@ -112,38 +104,31 @@ class Queue(object):
         """
         COMPACT_QUEUE = 'rq:queue:_compact:{0}'.format(uuid.uuid4())
 
-        self._connection._redis_conn.rename(self.key, COMPACT_QUEUE)
+        self.redis.rename(self.key, COMPACT_QUEUE)
         while True:
-            job_id = as_text(self._connection._redis_conn.lpop(COMPACT_QUEUE))
+            job_id = as_text(self.redis.lpop(COMPACT_QUEUE))
             if job_id is None:
                 break
             if self._connection.get_job(job_id) is not None:
-                self._connection._redis_conn.rpush(self.key, job_id)
+                self.redis.rpush(self.key, job_id)
 
     def push_job_id(self, job_id, at_front=False):
         """Pushes a job ID on the corresponding Redis queue.
         'at_front' allows you to push the job onto the front instead of the back of the queue"""
         if at_front:
-            self._connection._redis_conn.lpush(self.key, job_id)
+            self.redis.lpush(self.key, job_id)
         else:
-            self._connection._redis_conn.rpush(self.key, job_id)
+            self.redis.rpush(self.key, job_id)
 
     def _enqueue_job(self, job):
         """
-        It is much like `.enqueue()`, except that it takes the function's args
-        and kwargs as explicit arguments.  Any kwargs passed to this function
-        contain options for RQ itself.
+        This is a very low level function that acts on deferred jobs only. If
+        the job turns out not to be deferred nothing wil happen.
         """
-        # Make sure the queue actually exists
-        if self._async:
-            self._connection._redis_conn.sadd(REDIS_QUEUES_KEY, self.key)
-            job._attempt_enqueue()
-        else:
-            job.perform()
-            job.set_status(JobStatus.FINISHED)
-            job.save()
-            job.cleanup(DEFAULT_RESULT_TTL)
-
+        callback = partial(_attempt_enqueue, job_id=job.id,
+                           origin_name=self.name)
+        self.redis.transaction(callback, [key_for_job(job.id)])
+        job.refresh()
         return job
 
     def enqueue_call(self, func, args=None, kwargs=None, timeout=None,
@@ -167,7 +152,16 @@ class Queue(object):
                    meta=meta)
         job.save()
 
-        self._enqueue_job(job)
+        # Make sure the queue actually exists
+        if self._async:
+            self.redis.sadd(REDIS_QUEUES_KEY, self.key)
+            self._enqueue_job(job)
+        else:
+            job.perform()
+            job.set_status(JobStatus.FINISHED)
+            job.save()
+            job.cleanup(DEFAULT_RESULT_TTL)
+
         return job
 
     def enqueue(self, f, *args, **kwargs):
@@ -214,7 +208,7 @@ class Queue(object):
         """
         Pops a given job ID from this Redis queue.
         """
-        return as_text(self._connection._redis_conn.lpop(self.key))
+        return as_text(self.redis.lpop(self.key))
 
     def dequeue(self):
         """
@@ -272,7 +266,7 @@ class FailedQueue(Queue):
         Puts the given Job in quarantine (i.e. put it on the failed queue)
         """
         # Add Queue key set
-        self._connection._redis_conn.sadd(REDIS_QUEUES_KEY, self.key)
+        self.redis.sadd(REDIS_QUEUES_KEY, self.key)
         self.push_job_id(job.id)
 
         job.ended_at = utcnow()
@@ -283,24 +277,12 @@ class FailedQueue(Queue):
 
     def requeue(self, job_id):
         """ Requeues the job with the given job ID. """
-        try:
-            job = Job(id=job_id, connection=self._connection)
-            job.refresh()
-        except NoSuchJobError:
-            # Silently ignore/remove this job and return (i.e. do nothing)
-            self.remove(job_id)
-            return
-
-        # Delete it from the failed queue (raise an error if that failed) This
-        # doesn't have race condition, since only one process will successfuly
-        # remove this, on the downside, if the thread dies the job will be lost
-        # TODO make move atomic
-        if self.remove(job) == 0:
+        # Pop off the failed queue
+        job_id = self.redis.lrem(self.key, job_id)
+        if job_id is None:
             raise InvalidJobOperationError('Cannot requeue non-failed jobs')
 
-        # enqueue expects the job to be deferrer to prevent race conditions
-        job.set_status(JobStatus.DEFERRED)
-        job.exc_info = None
-        q = Queue(job.origin, connection=self._connection)
-        q.enqueue_job(job)
+        callback = partial(_requeue, job_id=job_id, failed_key=self.key,
+                           origin_key=key_for_queue(self.name))
+        return self.redis.transaction(callback, [key_for_job(job_id), self.key])
 

@@ -34,7 +34,18 @@ def queue_key_to_name(queue_key):
 def deferred_registry_name_to_key(name='default'):
     return 'rq:deferred:{0}'.format(name)
 
+def key_for_deferred_reg(name='default'):
+    return 'rq:deferred:{0}'.format(name)
+
 def queue_name_to_key(name):
+    """Returns a Queue instance, based on the naming conventions for naming
+    the internal Redis keys.  Can be used to reverse-lookup Queues by their
+    Redis keys.
+    """
+    prefix = REDIS_QUEUE_NAMESPACE_PREFIX
+    return '{0}{1}'.format(prefix, name)
+
+def key_for_queue(name):
     """Returns a Queue instance, based on the naming conventions for naming
     the internal Redis keys.  Can be used to reverse-lookup Queues by their
     Redis keys.

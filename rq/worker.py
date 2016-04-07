@@ -126,6 +126,10 @@ class Worker(object):
         elif exception_handlers is not None:
             self.push_exc_handler(exception_handlers)
 
+    @property
+    def redis(self):
+        return self._connection._redis_conn
+
     def validate_queues(self):
         """Sanity check for the given queues."""
         for queue in self.queues:
@@ -186,13 +190,13 @@ class Worker(object):
     def register_birth(self):
         """Registers its own birth."""
         self.log.debug('Registering birth of worker {0}'.format(self.name))
-        if (self._connection._exists(self.key) and
-                not self._connection._hexists(self.key, 'death')):
+        if (self.redis.exists(self.key) and
+                not self.redis.hexists(self.key, 'death')):
             msg = 'There exists an active worker named {0!r} already'
             raise ValueError(msg.format(self.name))
         key = self.key
         queues = ','.join(self.queue_names())
-        with self._connection._pipeline() as p:
+        with self.redis.pipeline() as p:
             p.delete(key)
             p.hset(key, 'birth', utcformat(utcnow()))
             p.hset(key, 'queues', queues)
@@ -203,7 +207,7 @@ class Worker(object):
     def register_death(self):
         """Registers its own death."""
         self.log.debug('Registering death')
-        with self._connection._pipeline() as p:
+        with self.redis.pipeline() as p:
             # We cannot use self.state = 'dead' here, because that would
             # rollback the pipeline
             p.srem(REDIS_WORKERS_KEY, self.key)
@@ -239,7 +243,7 @@ class Worker(object):
 
     def set_state(self, state, pipeline=None):
         self._state = state
-        self._connection._hset(self.key, 'state', state)
+        self.redis.hset(self.key, 'state', state)
 
     def _set_state(self, state):
         """Raise a DeprecationWarning if ``worker.state = X`` is used"""
@@ -265,12 +269,12 @@ class Worker(object):
     def set_current_job_id(self, job_id):
 
         if job_id is None:
-            self._connection._hdel(self.key, 'current_job')
+            self.redis.hdel(self.key, 'current_job')
         else:
-            self._connection._hset(self.key, 'current_job', job_id)
+            self.redis.hset(self.key, 'current_job', job_id)
 
     def get_current_job_id(self):
-        return as_text(self._connection._hget(self.key, 'current_job'))
+        return as_text(self.redis.hget(self.key, 'current_job'))
 
     def get_current_job(self):
         """Returns the job id of the currently executing job."""
@@ -335,7 +339,7 @@ class Worker(object):
         before_state = None
         notified = False
 
-        while not self._stop_requested and is_suspended(self._connection):
+        while not self._stop_requested and is_suspended(self.redis):
 
             if burst:
                 self.log.info('Suspended in burst mode, exiting')
@@ -443,7 +447,7 @@ class Worker(object):
         only larger.
         """
         timeout = max(timeout, self.default_worker_ttl)
-        connection.expire(self.key, timeout)
+        self.redis.expire(self.key, timeout)
         self.log.debug('Sent heartbeat to prevent worker timeout. '
                        'Next one should arrive within {0} seconds.'.format(timeout))
 
@@ -506,7 +510,7 @@ class Worker(object):
         """
         timeout = (job.timeout or 180) + 60
         raise NotImplemented()
-        with self._connection._pipeline() as pipeline:
+        with self.redis.pipeline() as pipeline:
             self.set_state(WorkerStatus.BUSY, pipeline=pipeline)
             self.set_current_job_id(job.id, pipeline=pipeline)
             self.heartbeat(timeout, pipeline=pipeline)

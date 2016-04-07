@@ -27,18 +27,22 @@ class BaseRegistry(object):
         return self.count
 
     @property
+    def redis(self):
+        return self._connection._redis_conn
+
+    @property
     def count(self):
         """Returns the number of jobs in this registry"""
         self.cleanup()
-        return self._connection._zcard(self.key)
+        return self.redis.zcard(self.key)
 
     def add(self, job, ttl=0):
         """Adds a job to a registry with expiry time of now + ttl."""
         score = ttl if ttl < 0 else current_timestamp() + ttl
-        return self._connection._zadd(self.key, score, job.id)
+        return self.redis.zadd(self.key, score, job.id)
 
     def remove(self, job):
-        return self._connection._zrem(self.key, job.id)
+        return self.redis.zrem(self.key, job.id)
 
     def get_expired_job_ids(self, timestamp=None):
         """Returns job ids whose score are less than current timestamp.
@@ -49,13 +53,13 @@ class BaseRegistry(object):
         """
         score = timestamp if timestamp is not None else current_timestamp()
         return [as_text(job_id) for job_id in
-                self._connection._zrangebyscore(self.key, 0, score)]
+                self.redis.zrangebyscore(self.key, 0, score)]
 
     def get_job_ids(self, start=0, end=-1):
         """Returns list of all job ids."""
         self.cleanup()
         return [as_text(job_id) for job_id in
-                self._connection._zrange(self.key, start, end)]
+                self.redis.zrange(self.key, start, end)]
 
 
 class StartedJobRegistry(BaseRegistry):
@@ -119,7 +123,7 @@ class FinishedJobRegistry(BaseRegistry):
         unspecified.
         """
         score = timestamp if timestamp is not None else current_timestamp()
-        self.connection.zremrangebyscore(self.key, 0, score)
+        self.redis.zremrangebyscore(self.key, 0, score)
 
 
 class DeferredJobRegistry(BaseRegistry):
@@ -140,7 +144,8 @@ class DeferredJobRegistry(BaseRegistry):
 
 def clean_registries(queue):
     """Cleans StartedJobRegistry and FinishedJobRegistry of a queue."""
-    registry = FinishedJobRegistry(name=queue.name, connection=queue.connection)
+    registry = FinishedJobRegistry(name=queue.name, connection=queue._connection)
     registry.cleanup()
-    registry = StartedJobRegistry(name=queue.name, connection=queue.connection)
+    registry = StartedJobRegistry(name=queue.name, connection=queue._connection)
     registry.cleanup()
+
