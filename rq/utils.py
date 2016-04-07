@@ -243,64 +243,66 @@ def compact(l):
     return [x for x in l if x is not None]
 
 
-def _enqueue_or_defer(pipe, job_id, queue_name, dep_status_map):
+def _enqueue_or_defer(pipe, job_id, queue_name):
 
     from .job import JobStatus
 
-    remaining_deps = [id for id, status in dep_status_map
-                      if status != JobStatus.FINISHED]
-    if len(remaining_deps) > 0:
-        # Dependencies remain, add to deferred list, change status to
-        # deferred, clear enqueued at and add job_id to reverse depends
-        pipe.sadd(key_for_deferred_reg(queue_name), job_id)
-        pipe.hset(key_for_job(job_id), 'status', JobStatus.DEFERRED)
-        pipe.hset(key_for_job(job_id), 'enqueued_at', None)
+    ##################
+    # Querying
+    ##################
+    # Get all the jobs parents
+    parent_ids_str = pipe.hget(key_for_job(job_id), 'dependency_ids')
+    parent_ids = filter(lambda x: x != '', parent_ids_str.strip(',').split(','))
+    if parent_ids:
+        pipe.watch(*[key_for_job(parent_id) for parent_id in parent_ids])
 
-        # Add job_id to the set of jobs to watch by parents
-        for dep_id in remaining_deps:
-            pipe.sadd(key_for_dependents(dep_id), job_id)
+    # Check that all the parents have finished
+    parent_status_map = {id: pipe.hget(key_for_job(id), 'status')
+                         for id in parent_ids}
+
+    pipe.multi()
+
+    ##################
+    # Writing
+    ##################
+
+    remaining_parents = [id for id, status in parent_status_map.items()
+                         if status != JobStatus.FINISHED]
+    finished_parents = [id for id, status in parent_status_map.items()
+                        if status == JobStatus.FINISHED]
+    if len(remaining_parents) > 0:
+        # Parents remain, add to deferred list, change status to
+        # deferred, clear enqueued at and add job_id to reverse depends
+        pipe.zadd(key_for_deferred_reg(queue_name), **{job_id: current_timestamp()})
+        pipe.hset(key_for_job(job_id), 'status', JobStatus.DEFERRED)
+
+        # Add job_id to the set of jobs to watch for each of the jobs this
+        # depends on
+        for parent_id in remaining_parents:
+            pipe.sadd(key_for_dependents(parent_id), job_id)
     else:
-        # No dependencies, so we are greenlit to enqueue the job. Change its
-        # state, set enqueued_at and add to the queue. Remove ourself from
-        # reverse deps to be nice as well
-        pipe.srem(key_for_deferred_reg(queue_name), job_id)
+        # No parents, so we are greenlit to enqueue the job. Change its
+        # state, set enqueued_at and add to the queue.
+        pipe.zrem(key_for_deferred_reg(queue_name), job_id)
         pipe.hset(key_for_job(job_id), 'status', JobStatus.QUEUED)
         pipe.hset(key_for_job(job_id), 'enqueued_at', utcformat())
         pipe.rpush(key_for_queue(queue_name), job_id)
 
-        # Add job_id to the set of jobs to watch by parents
-        for dep_id in remaining_deps:
-            pipe.srem(key_for_dependents(dep_id), job_id)
+    # Remove this job_id from the parent's dependents set
+    for parent_id in finished_parents:
+        pipe.srem(key_for_dependents(parent_id), job_id)
 
 
 def _requeue(pipe, job_id, failed_key, origin_name):
     """
     Re-add a job to the
     """
-    ##################
-    # Querying
-    ##################
-
-    # Get all the jobs dependents
-    dep_ids = pipe.smembers(key_for_dependents(job_id))
-    if dep_ids:
-        pipe.watch(*[key_for_job(dep_id) for dep_id in dep_ids])
-
-    # Check that all the dependents have finished
-    statuses = {id: pipe.hget(key_for_job(id), 'status')
-                for id in dep_ids}
-
-    pipe.multi()
+    _enqueue_or_defer(pipe, job_id, origin_name)
 
     # Job still exists, so one way or another it is going to be removed
     # form the failed queue
     pipe.lrem(failed_key, job_id)
     pipe.hset(key_for_job(job_id), 'exc_info', None)
-
-    ##################
-    # Writing
-    ##################
-    _enqueue_or_defer(pipe, job_id, origin_name, statuses)
 
 
 def _attempt_enqueue(pipe, job_id, origin_name):
@@ -311,18 +313,7 @@ def _attempt_enqueue(pipe, job_id, origin_name):
     if status != JobStatus.DEFERRED:
         return
 
-    dep_ids = pipe.smembers(key_for_dependents(job_id))
-    if dep_ids:
-        pipe.watch(*[key_for_job(dep_id) for dep_id in dep_ids])
-
-    # Check that all the dependents have finished
-    statuses = {id: pipe.hget(key_for_job(id), 'status')
-                for id in dep_ids}
-
-    pipe.multi()
-
-    # write out based on statuses
-    _enqueue_or_defer(pipe, job_id, origin_name, statuses)
+    _enqueue_or_defer(pipe, job_id, origin_name)
 
 
 def _clean_queue(pipe, queue_key):
@@ -340,4 +331,21 @@ def _clean_queue(pipe, queue_key):
         pipe.delete(key_for_dependents(job_id))
 
     return len(job_ids)
+
+
+def _remove_empty_key(pipe, name):
+    pipe.watch(name)
+    val_type = pipe.type(name)
+
+    do_remove = False
+    if val_type == 'list' and pipe.llen(name) == 0:
+        do_remove = True
+    elif val_type == 'set' and pipe.scard(name) == 0:
+        do_remove = True
+    elif val_type == 'zset' and pipe.zcard(name) == 0:
+        do_remove = True
+
+    if do_remove:
+        pipe.multi()
+        pipe.delete(name)
 

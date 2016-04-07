@@ -6,13 +6,12 @@ import inspect
 import warnings
 from functools import partial
 from uuid import uuid4
-from redis import WatchError
 
 from .compat import as_text, decode_redis_hash, string_types, text_type
 from .exceptions import NoSuchJobError, UnpickleError
-from .utils import enum, import_attribute, utcformat, utcnow, utcparse
-from .keys import (key_for_job, dependents_key_for_job, key_for_dependents,
-                   queue_name_to_key)
+from .utils import (enum, import_attribute, utcformat, utcnow, utcparse,
+                    _attempt_enqueue, _remove_empty_key)
+from .keys import key_for_job, dependents_key_for_job, key_for_dependents
 
 try:
     import cPickle as pickle
@@ -124,7 +123,8 @@ class Job(object):
             self._func_name = '{0}.{1}'.format(func.__module__, func.__name__)
         elif isinstance(func, string_types):
             self._func_name = as_text(func)
-        elif not inspect.isclass(func) and hasattr(func, '__call__'):  # a callable class instance
+        elif not inspect.isclass(func) and hasattr(func, '__call__'):
+            # a callable class instance
             self._instance = func
             self._func_name = '__call__'
         else:
@@ -518,10 +518,23 @@ class Job(object):
         """
         Try to enqueue all of the jobs dependents
         """
-        for child_id in self._dependency_ids:
+        for child_id in self.redis.smembers(key_for_dependents(self.id)):
             child = Job(child_id, connection=self._connection)
             child.refresh()
-            prev_status, new_status = child._try_enqueue_job()
+            child._enqueue()
+
+        callback = partial(_remove_empty_key, name=key_for_dependents(self.id))
+        self.redis.transaction(callback)
+
+    def _enqueue(self):
+        """
+        Attempt to enqueue this job based on its dependencies
+        """
+        callback = partial(_attempt_enqueue, job_id=self.id,
+                           origin_name=self.origin)
+        self.redis.transaction(callback, [key_for_job(self.id)])
+        self.refresh()
+        return self
 
     def requeue_job(self):
         """Requeues the job with the given job ID.  If no such job exists, just

@@ -69,6 +69,9 @@ else:
     string_types = (str, unicode)
 
     def as_text(v):
+        if v == 'None':
+            import ipdb; ipdb.set_trace()
+
         if v is None:
             return None
         return v.decode('utf-8')

@@ -117,6 +117,9 @@ class RQConnection(object):
         """Returns a handle to the special failed queue."""
         return FailedQueue(connection=self)
 
+    def get_deferred_queue(self, name):
+        return DeferredJobRegistry(name, connection=self)
+
     def dequeue_any(self, queues, timeout):
         """
         Returns Job instance at the front of the given set of Queues,

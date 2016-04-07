@@ -9,9 +9,9 @@ from .defaults import DEFAULT_RESULT_TTL
 from .compat import as_text, string_types, total_ordering
 from .exceptions import (InvalidJobOperationError, UnpickleError)
 from .job import Job, JobStatus
-from .utils import utcnow, _requeue, _attempt_enqueue, _clean_queue
-from .keys import (key_for_queue, REDIS_QUEUES_KEY, key_for_job,
-                   key_for_dependents)
+from .utils import utcnow, _requeue, _clean_queue
+from .keys import key_for_queue, REDIS_QUEUES_KEY, key_for_job
+
 
 def compact(lst):
     return [item for item in lst if item is not None]
@@ -31,7 +31,7 @@ class Queue(object):
             self._connection = RQConnection(connection)
 
         self.name = name
-        self._default_timeout = default_timeout
+        self._default_timeout = default_timeout or self.DEFAULT_TIMEOUT
         self._async = async
         self._key = key_for_queue(name)
 
@@ -120,17 +120,6 @@ class Queue(object):
         else:
             self.redis.rpush(self.key, job_id)
 
-    def _enqueue_job(self, job):
-        """
-        This is a very low level function that acts on deferred jobs only. If
-        the job turns out not to be deferred nothing wil happen.
-        """
-        callback = partial(_attempt_enqueue, job_id=job.id,
-                           origin_name=self.name)
-        self.redis.transaction(callback, [key_for_job(job.id)])
-        job.refresh()
-        return job
-
     def enqueue_call(self, func, args=None, kwargs=None, timeout=None,
                      result_ttl=None, ttl=None, description=None,
                      depends_on=None, at_front=False, meta=None):
@@ -155,7 +144,8 @@ class Queue(object):
         # Make sure the queue actually exists
         if self._async:
             self.redis.sadd(REDIS_QUEUES_KEY, self.key)
-            self._enqueue_job(job)
+            #self._enqueue_job(job)
+            job._enqueue()
         else:
             job.perform()
             job.set_status(JobStatus.FINISHED)
