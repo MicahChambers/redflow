@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
+from mock import patch
+from rq import RQConnection, Queue
 
-from rq import Connection, Queue
-
+import rq
 from tests import find_empty_redis_database, RQTestCase
 from tests.fixtures import do_nothing
 
@@ -11,30 +12,94 @@ from tests.fixtures import do_nothing
 def new_connection():
     return find_empty_redis_database()
 
+class MockStrictRedis(object):
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
 
 class TestConnectionInheritance(RQTestCase):
-    def test_connection_detection(self):
-        """Automatic detection of the connection."""
-        q = Queue()
-        self.assertEqual(q.connection, self.testconn)
+    def test_connection_requires_parameters(self):
+        with self.assertRaises(ValueError):
+            RQConnection()
 
-    def test_connection_stacking(self):
-        """Connection stacking."""
-        conn1 = new_connection()
-        conn2 = new_connection()
+    @patch('rq.connections.StrictRedis', MockStrictRedis)
+    def test_argument_passing(self):
+        conn = RQConnection(redis_kwargs={'hello':'world'})
+        self.assertEqual(conn._redis_conn.args, ())
+        self.assertEqual(conn._redis_conn.kwargs, {'hello': 'world'})
 
-        with Connection(conn1):
-            q1 = Queue()
-            with Connection(conn2):
-                q2 = Queue()
-        self.assertNotEqual(q1.connection, q2.connection)
+    def test_redis_conn_pass(self):
+        conn = RQConnection(self.testconn)
+        self.assertEqual(conn._redis_conn, self.testconn)
 
-    def test_connection_pass_thru(self):
-        """Connection passed through from queues to jobs."""
-        q1 = Queue()
-        with Connection(new_connection()):
-            q2 = Queue()
-        job1 = q1.enqueue(do_nothing)
-        job2 = q2.enqueue(do_nothing)
-        self.assertEqual(q1.connection, job1.connection)
-        self.assertEqual(q2.connection, job2.connection)
+    def test_mkqueue_doesnt_write(self):
+        conn = RQConnection(self.testconn)
+        conn.mkqueue()
+        self.assertEqual(self.testconn.keys(), [])
+
+    def test_get_queues(self):
+        conn = RQConnection(self.testconn)
+        queue1 = conn.mkqueue()
+        queue2 = conn.mkqueue()
+
+        # Queues should be creatd yet
+        self.assertEqual(conn.get_all_queues(), [])
+
+        queue1.enqueue(do_nothing)
+        queue2.enqueue(do_nothing)
+
+        self.assertEqual(set(conn.get_all_queues()),
+                         set([queue1, queue2]))
+
+    def test_get_workers(self):
+        conn = RQConnection(self.testconn)
+        queue = conn.mkqueue()
+
+        # Queues should be creatd yet
+        self.assertEqual(conn.get_all_workers(), [])
+
+        worker1 = conn.mkworker(queue, name='w1')
+        worker2 = conn.mkworker(queue, name='w2')
+        self.assertEqual(conn.get_all_workers(), [])
+
+        worker1.register_birth()
+        worker2.register_birth()
+
+        self.assertEqual(set([worker for worker in conn.get_all_workers()]),
+                         set([worker1, worker2]))
+
+        self.assertEqual(conn.get_worker('w1'), worker1)
+        self.assertEqual(conn.get_worker('w2'), worker2)
+
+
+    def test_get_job(self):
+
+        conn = RQConnection(self.testconn)
+        queue1 = conn.mkqueue('q1')
+        queue2 = conn.mkqueue('q2')
+
+        job1 = queue1.enqueue(do_nothing)
+        job2 = queue2.enqueue(do_nothing)
+
+        job1_ret = conn.get_job(job1.id)
+        job2_ret = conn.get_job(job2.id)
+
+        self.assertEqual(job1_ret.origin, 'q1')
+        self.assertEqual(job2_ret.origin, 'q2')
+        self.assertEqual(job1_ret.id, job1.id)
+        self.assertEqual(job2_ret.id, job2.id)
+
+#    def test_connection_detection(self):
+#        """Automatic detection of the connection."""
+#        q = Queue()
+#        self.assertEqual(q.connection, self.testconn)
+#
+#   def test_connection_pass_thru(self):
+#       """Connection passed through from queues to jobs."""
+#       q1 = Queue()
+#       with Connection(new_connection()):
+#           q2 = Queue()
+#       job1 = q1.enqueue(do_nothing)
+#       job2 = q2.enqueue(do_nothing)
+#       self.assertEqual(q1.connection, job1.connection)
+#       self.assertEqual(q2.connection, job2.connection)

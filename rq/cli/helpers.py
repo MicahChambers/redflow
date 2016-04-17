@@ -5,25 +5,39 @@ from __future__ import (absolute_import, division, print_function,
 import importlib
 import time
 from functools import partial
+import yaml
 
 import click
 import redis
 from redis import StrictRedis
-from rq import Queue, Worker
 from rq.logutils import setup_loghandlers
 from rq.worker import WorkerStatus
+from rq.exceptions import InvalidConfiguration
 
 red = partial(click.style, fg='red')
 green = partial(click.style, fg='green')
 yellow = partial(click.style, fg='yellow')
 
 
-def read_config_file(module):
-    """Reads all UPPERCASE variables defined in the given module file."""
-    settings = importlib.import_module(module)
-    return dict([(k, v)
-                 for k, v in settings.__dict__.items()
-                 if k.upper() == k])
+DEFAULT_CONFIGS = ('~/.config/rq.yaml', '~/.rq.yaml', 'rq.yaml')
+
+
+def read_default_config_files():
+    for ff in path:
+        try:
+            return read_config_file(ff)
+        except Exception:
+            pass
+    return None
+
+
+def read_config_file(path):
+    try:
+        with open(path, 'r') as f:
+            config = yaml.load(f.read())
+    except Exception:
+        raise InvalidConfiguration('{} was not a valid yaml file!'.format(path))
+    return config
 
 
 def get_redis_from_config(settings):
@@ -81,11 +95,11 @@ def state_symbol(state):
         return state
 
 
-def show_queues(queues, raw, by_queue):
+def show_queues(conn, queues, raw, by_queue):
     if queues:
         qs = list(map(Queue, queues))
     else:
-        qs = Queue.all()
+        qs = conn.get_all_queues()
 
     num_jobs = 0
     termwidth, _ = click.get_terminal_size()
@@ -116,7 +130,7 @@ def show_queues(queues, raw, by_queue):
         click.echo('%d queues, %d jobs total' % (len(qs), num_jobs))
 
 
-def show_workers(queues, raw, by_queue):
+def show_workers(conn, queues, raw, by_queue):
     if queues:
         qs = list(map(Queue, queues))
 
@@ -126,14 +140,14 @@ def show_workers(queues, raw, by_queue):
             return any(map(queue_matches, worker.queues))
 
         # Filter out workers that don't match the queue filter
-        ws = [w for w in Worker.all() if any_matching_queue(w)]
+        ws = [w for w in conn.get_all_workers() if any_matching_queue(w)]
 
         def filter_queues(queue_names):
             return [qname for qname in queue_names if Queue(qname) in qs]
 
     else:
-        qs = Queue.all()
-        ws = Worker.all()
+        qs = conn.get_all_queues()
+        ws = conn.get_all_workers()
         filter_queues = (lambda x: x)
 
     if not by_queue:
@@ -164,11 +178,11 @@ def show_workers(queues, raw, by_queue):
         click.echo('%d workers, %d queues' % (len(ws), len(qs)))
 
 
-def show_both(queues, raw, by_queue):
-    show_queues(queues, raw, by_queue)
+def show_both(conn, queues, raw, by_queue):
+    show_queues(conn, queues, raw, by_queue)
     if not raw:
         click.echo('')
-    show_workers(queues, raw, by_queue)
+    show_workers(conn, queues, raw, by_queue)
     if not raw:
         click.echo('')
         import datetime
@@ -197,3 +211,4 @@ def setup_loghandlers_from_args(verbose, quiet):
     else:
         level = 'INFO'
     setup_loghandlers(level)
+
