@@ -128,84 +128,135 @@ class Queue(object):
             self._storage._rpush(self.key, job_id)
 
     @transaction
-    def _enqueue_job(self, func, args=None, kwargs=None, timeout=None,
-                     result_ttl=None, ttl=None, description=None,
-                     depends_on=None, job_id=None, at_front=False, meta=None):
+    def _enqueue_or_deferr_job(self, job, at_front=False):
+        """
+        If job depends on an unfinished job, register itself on it's parent's
+        dependents instead of enqueueing it.
+        Otherwise enqueue the job
+        """
 
-        timeout = timeout or self._default_timeout
+        # check if all parents are done
+        parents_remaining = job._unfinished_parents()
+        deferred = self._storage.get_deferred_registery(self.name)
 
-        # Load existing, or create a new job
-        if job_id is not None:
-            job = self.job_class(job_id, storage=self._storage)
-            job.refresh()
-        else:
-            # Create a new job (but don't write until the end)
-            job = self.job_class(storage=self._storage)
-            job._new(storage=self._storage, func, args=args, kwargs=kwargs,
-                     result_ttl=result_ttl, ttl=ttl, status=JobStatus.QUEUED,
-                     description=description, depends_on=depends_on,
-                     timeout=timeout, id=job_id, origin=self.name, meta=meta)
+        # save the job
+        job.save()
 
-        # If job depends on an unfinished job, register itself on it's
-        # parent's dependents instead of enqueueing it.
-        # If WatchError is raised in the process, that means something else is
-        # modifying the dependency. In this case we simply retry
-        remaining_dependencies = []
-        if depends_on:
-            if not isinstance(depends_on, list):
-                if not isinstance(depends_on, self.job_class):
-                    depends_on = Job(id=depends_on, storage=self._storage)
-                dependencies = [depends_on]
-            else:
-                dependencies = depends_on
-
-            pipe.watch(*[dependency.key for dependency in dependencies])
-            for dependency in dependencies:
-                if dependency.get_status() != JobStatus.FINISHED:
-                    remaining_dependencies.append(dependency)
-
-        # Writing
-        if remaining_dependencies:
+        if len(parents_remaining) > 0:
+            # Update deferred registry, parent's children set and job
             job.set_status(JobStatus.DEFERRED)
-            job.register_dependencies(remaining_dependencies)
-            job.save()
-            return job
+            deferred.add(job.id)
+
+            for parent in parents_remaining:
+                parent._add_child(job.id)
         else:
-            # Add Queue key set
+            # Make sure the queue exists
             self._storage._sadd(queues_key(self.name), self.key)
+
+            # enqueue the job
             job.set_status(JobStatus.QUEUED)
-
-            job.origin = self.name
             job.enqueued_at = utcnow()
-
             if job.timeout is None:
                 job.timeout = self.DEFAULT_TIMEOUT
+
             job.save()
-
-            if self._async:
-                self.push_job_id(job.id, at_front=at_front)
-
-            return job
-
+            self.push_job_id(job.id, at_front=at_front)
 
     def enqueue_call(self, func, args=None, kwargs=None, timeout=None,
                      result_ttl=None, ttl=None, description=None,
-                     depends_on=None, job_id=None, at_front=False, meta=None):
+                     depends_on=None, at_front=False, meta=None):
         """
-        Creates a job to represent the delayed function call and enqueues
-        it.
+        Creates a job to represent the delayed function call and enqueues it.
 
         It is much like `.enqueue()`, except that it takes the function's args
         and kwargs as explicit arguments.  Any kwargs passed to this function
         contain options for RQ itself.
-        """
-        self._enqueue_new_job()
 
-        if not self._async:
-            job.perform()
-            job._save_results()
+        Design: Jobs keep track of both their children and their parents but
+        the child is responsible for adding itself to the parent's children
+        list, since the child will always come after.
+        """
+        # Create job in memory
+        timeout = timeout or self._default_timeout
+        job = self.job_class(storage=self._storage)
+        job._new(storage=self._storage, func, args=args, kwargs=kwargs,
+                 result_ttl=result_ttl, ttl=ttl, status=JobStatus.QUEUED,
+                 description=description, depends_on=depends_on,
+                 timeout=timeout, origin=self.name, meta=meta)
+
+        if self._async:
+            self._enqueue_or_deferr_job(job, at_front=at_front)
+        else:
+            assert len(job._unfinished_parents()) == 0
+            self._setup_job_perform(job)
+            try:
+                job.perform()
+            except:
+                self._finish_job_perform(job)
+            else:
+                self._error_job_perform(job)
 
         return job
+
+    @transaction
+    def _setup_job_perform(self, job):
+        self._storage._persist(job.key)
+
+    @transaction
+    def _finish_job_perform(self, job):
+        # Now that the job is finished, check its dependents (children) to see
+        # which are ready to start
+
+        ready_jobs = []
+        ready_queues = []
+        ready_def_regs = []
+        non_ready_jobs = []
+
+        for job_id in self._storage._smembers(job.children_key):
+            job = self._storage.get_job(job_id)
+            if job.has_unmet_dependencies():
+                non_ready_jobs.append(job)
+            else:
+                # Save jobs, queues and registries of jobs that we are about to
+                # enqueue, since after we start writing we can't stop
+                ready_jobs.append(job)
+                ready_queus.append(self._storage.get_queue(job.origin))
+                ready_regs .append(self._storage.get_deferred_registery(job.origin))
+
+        # Remove our children list
+        self._storage._delete(job.children_key)
+
+        # since job still isn't ready, just remove ourselves from the parents
+        # list, so it is clear that we (the current job) isn't blocking. Since
+        # these jobs are already deferred no need to modify the registry,
+        # queue or job itself
+        for non_ready_job in non_ready_jobs:
+            non_ready_job._remove_parent(job.id)
+
+        # These jobs are ready so they don't have any parents anymore -- that
+        # key can be removed. The jobs queue should have the job_id added and
+        # deferred
+        for ready_job, ready_queue, ready_def_reg in zip(ready_jobs, ready_queues,
+                                                         ready_def_regs):
+
+            ready_job._remove_parents()
+            ready_def_reg.remove(ready_job.id)
+
+            # enqueue the job
+            ready_job.set_status(JobStatus.QUEUED)
+            ready_job.enqueued_at = utcnow()
+            if ready_job.timeout is None:
+                ready_job.timeout = ready_queue.DEFAULT_TIMEOUT
+
+            job.save()
+
+            # Todo store at_front in the job so that it skips the line here
+            ready_queue.push_job_id(job.id, at_front=False)
+
+
+    @transaction
+    def _error_job_perform(self, job):
+        self.set_status(JobStatus.FAILED)
 
     def enqueue(self, f, *args, **kwargs):
         """Creates a job to represent the delayed function call and enqueues
@@ -247,53 +298,7 @@ class Queue(object):
                                  description=description, depends_on=depends_on,
                                  job_id=job_id, at_front=at_front, meta=meta)
 
-    @transaction
-    def enqueue_dependents(self, job):
-        """Enqueues all jobs in the given job's dependents set and clears it."""
-        from .registry import DeferredJobRegistry
-
-        job_ids = self._storage.smembers(job.dependents_key)
-        dependents = [self._storage.get_job(job_id) for job_id in job_ids]
-        registries = [self._storage.get_deferred_registery(job.origin)
-                      for job in dependents]
-
-        for dependent, registry in zip(dependents, registries):
-            if not dependent.has_unmet_dependencies():
-                if dependent.origin == self.name:
-                    self.enqueue_job(dependent, pipeline=pipeline)
-                else:
-                    queue = Queue(name=dependent.origin,
-                                  connection=self.connection)
-                    queue.enqueue_job(dependent, pipeline=pipeline)
-            pipeline.execute()
-
-        # writes
-        for dependent, registry in zip(dependents, registries):
-            registry.remove(dependent)
-            dependent.remove_dependency(job.id)
-
-    def enqueue_dependents(self, job):
-        """Enqueues all jobs in the given job's dependents set and clears it."""
-        from .registry import DeferredJobRegistry
-
-        while True:
-            job_id = as_text(self.connection.spop(job.dependents_key))
-            if job_id is None:
-                break
-            dependent = self.job_class.fetch(job_id, connection=self.connection)
-            registry = DeferredJobRegistry(dependent.origin, self.connection)
-            with self.connection._pipeline() as pipeline:
-                registry.remove(dependent, pipeline=pipeline)
-                dependent.remove_dependency(job.id)
-                if not dependent.has_unmet_dependencies():
-                    if dependent.origin == self.name:
-                        self.enqueue_job(dependent, pipeline=pipeline)
-                    else:
-                        queue = Queue(name=dependent.origin,
-                                      connection=self.connection)
-                        queue.enqueue_job(dependent, pipeline=pipeline)
-                pipeline.execute()
-
+    ####### TODO HERE ##########
     def pop_job_id(self):
         """Pops a given job ID from this Redis queue."""
         return as_text(self.connection.lpop(self.key))
@@ -452,3 +457,4 @@ class FailedQueue(Queue):
         job.exc_info = None
         q = Queue(job.origin, connection=self.connection)
         q.enqueue_job(job)
+

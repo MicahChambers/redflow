@@ -21,11 +21,11 @@ def job_id_from_key(key):
 def job_key_from_id(job_id):
     return REDIS_JOB_NAMESPACE_PREFIX + job_id
 
-def dependents_key_from_id(job_id):
-    return 'rq:job:{0}:dependents'.format(job_id)
+def children_key_from_id(job_id):
+    return 'rq:job:{0}:children'.format(job_id)
 
-def dependencies_key_from_id(job_id):
-    return 'rq:job:{0}:dependencies'.format(job_id)
+def parents_key_from_id(job_id):
+    return 'rq:job:{0}:parents'.format(job_id)
 
 def started_registry_key_from_name(name):
     return 'rq:wip:{0}'.format(name)

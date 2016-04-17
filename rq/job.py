@@ -104,8 +104,7 @@ class Job(object):
         if not isinstance(kwargs, dict):
             raise TypeError('{0!r} is not a valid kwargs dict'.format(kwargs))
 
-        if id is not None:
-            self.set_id(id)
+        self._id = text_type(uuid4())
 
         if origin is not None:
             self.origin = origin
@@ -138,9 +137,9 @@ class Job(object):
         # dependencies could be a single job or a list of jobs
         if depends_on:
             if isinstance(depends_on, list):
-                self._dependency_ids = [tmp.id for tmp in depends_on]
+                self._parent_ids = [tmp.id for tmp in depends_on]
             else:
-                self._dependency_ids = ([depends_on.id]
+                self._parent_ids = ([depends_on.id]
                                         if isinstance(depends_on, Job)
                                         else [depends_on])
 
@@ -179,34 +178,42 @@ class Job(object):
         Returns a list of job's dependencies. To avoid repeated Redis fetches,
         cache job.dependencies
         """
-        if self._dependency_ids is None:
+        if self._parent_ids is None:
             return None
         if hasattr(self, '_dependencies'):
             return self._dependencies
         self._dependencies = [self._storage.get_job(dependency_id)
-                              for dependency_id in self._dependency_ids]
+                              for dependency_id in self._parent_ids]
 
         return self._dependencies
 
     @transaction
     def remove_dependency(self, dependency_id):
-        """Removes a dependency from job. This is usually called when
-        dependency is successfully executed."""
-        # TODO: can probably be pipelined
+        """
+        Removes a dependency from job. This is usually called when
+        dependency is successfully executed.
+        """
         self._storage._srem(self.dependencies_key, dependency_id)
 
     @transaction
     def has_unmet_dependencies(self):
         """Checks whether job has dependencies that aren't yet finished."""
-        return bool(self._storage._scard(self.dependencies_key))
+        return bool(self._storage._scard(self.parents_key))
+
+    @property
+    def dependents(self):
+        """
+        Returns a list of jobs whose execution depends on this
+        job's successful execution"""
+        return self.children
 
     @transaction
     @property
-    def dependents(self):
+    def children(self):
         """Returns a list of jobs whose execution depends on this
         job's successful execution"""
-        dependents_ids = self._storage._smembers(self.dependents_key)
-        return [self._storage.get_job(id) for id in dependents_ids]
+        children_ids = self._storage._smembers(self.children_key)
+        return [self._storage.get_job(id) for id in children_ids]
 
     @property
     def func(self):
@@ -328,7 +335,7 @@ class Job(object):
         self.result_ttl = None
         self.ttl = None
         self._status = None
-        self._dependency_ids = None
+        self._parent_ids = None
         self.meta = {}
 
     def __repr__(self):  # noqa
@@ -342,7 +349,6 @@ class Job(object):
         first time the ID is requested.
         """
         return self._id
-        return 'rq:job:{0}:dependents'.format(job_id)
 
     @property
     def key(self):
@@ -350,14 +356,24 @@ class Job(object):
         return job_key_from_id(self.id)
 
     @property
+    def children_key(self):
+        """The Redis key that is used to store job dependents hash under."""
+        return children_key_from_id(self.id)
+
+    @property
     def dependents_key(self):
         """The Redis key that is used to store job dependents hash under."""
-        return dependents_key_from_id(self.id)
+        return self.children_key
 
     @property
     def dependencies_key(self):
         """The Redis key that is used to store job dependancies hash under."""
-        return dependencies_key_from_id(self.id)
+        return self.parents_key
+
+    @property
+    def parents_key(self):
+        """The Redis key that is used to store job dependancies hash under."""
+        return parents_key_from_id(self.id)
 
     @transaction
     @property
@@ -419,7 +435,7 @@ class Job(object):
         self.timeout = int(obj.get('timeout')) if obj.get('timeout') else None
         self.result_ttl = int(obj.get('result_ttl')) if obj.get('result_ttl') else None  # noqa
         self._status = as_text(obj.get('status') if obj.get('status') else None)
-        self._dependency_ids = as_text(obj.get('dependency_ids', '')).split(' ')
+        self._parent_ids = as_text(obj.get('parent_ids', '')).split(' ')
         self.ttl = int(obj.get('ttl')) if obj.get('ttl') else None
         self.meta = unpickle(obj.get('meta')) if obj.get('meta') else {}
 
@@ -449,8 +465,8 @@ class Job(object):
             obj['result_ttl'] = self.result_ttl
         if self._status is not None:
             obj['status'] = self._status
-        if self._dependency_ids is not None:
-            obj['dependency_ids'] = ' '.join(self._dependency_ids)
+        if self._parent_ids is not None:
+            obj['parent_ids'] = ' '.join(self._parent_ids)
         if self.meta:
             obj['meta'] = dumps(self.meta)
         if self.ttl:
@@ -463,6 +479,7 @@ class Job(object):
         """Persists the current job instance to its corresponding Redis key."""
         key = self.key
 
+        # TODO also register our dependencies
         self._storage._hmset(key, self.to_dict())
         self.cleanup(self.ttl)
 
@@ -485,14 +502,13 @@ class Job(object):
         """Cancels the job and deletes the job hash from Redis."""
         self.cancel()
         self._storage._delete(self.key)
-        self._storage._delete(self.dependents_key)
+        self._storage._delete(self.children_key)
 
     # Job execution
     def perform(self):  # noqa
         """
         Invokes the job function with the job arguments.
         """
-        self._connection._redis_conn.persist(self.key)
         self.ttl = -1
         _job_stack.push(self.id)
         try:
@@ -551,32 +567,46 @@ class Job(object):
             self._storage._expire(self.key, ttl)
 
     @transaction
-    def _save_results(self):
-        job.set_status(JobStatus.FINISHED)
-        job.save()
-        job.cleanup(DEFAULT_RESULT_TTL)
+    def _unfinished_parents(self):
+        """
+        Intended to be run on in-memory job (i.e. should not load or save from
+        the job key itself)
+
+        :return list: of job objects
+        """
+        self._storage.watch(*[job_key_from_id(id) for id in self._parent_ids])
+
+        unfinished_parents = []
+        for parent_id in self._parent_ids:
+            parent = self._storage.get_job(parent_id)
+            if parent.get_status() != JobStatus.FINISHED:
+                unfinished_parents.append(parent)
+
+        return unfinished_parents
 
     @transaction
-    def register_dependencies(self, dependencies):
-        """Jobs may have dependencies. Jobs are enqueued only if the job they
-        depend on is successfully performed. We record this relation as
-        a reverse dependency (a Redis set), with a key that looks something
-        like:
-
-            rq:job:job_id:dependents = {'job_id_1', 'job_id_2'}
-
-        This method adds the job in its dependency's dependents set
-        and adds the job to DeferredJobRegistry.
+    def _add_child(self, child_id):
         """
-        registry = self._storage.get_deferred_registery(self.origin)
-        registry.add(self)
+        Adds a child job id to the list of jobs to update after this job
+        finishes
+        """
+        self._storage._sadd(self.children_key, child_id)
 
-        connection = pipeline if pipeline is not None else self.connection
-        connection.sadd(self.dependencies_key,
-                        *[dependency.id for dependency in dependencies])
+    @transaction
+    def _remove_parents(self):
+        """
+        Adds a child job id to the list of jobs to update after this job
+        finishes
+        """
+        self._storage._delete(self.parents_key)
 
-        for dependency in dependencies:
-            connection.sadd(dependents_key_from_id(dependency.id), self.id)
+    @transaction
+    def _remove_parent(self, parent_id=None):
+        """
+        Adds a child job id to the list of jobs to update after this job
+        finishes
+        """
+        self._storage._srem(self.parents_key, parent_id)
 
     def __str__(self):
         return '<Job {0}: {1}>'.format(self.id, self.description)
