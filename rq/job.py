@@ -3,16 +3,16 @@ from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
 import inspect
-import warnings
 from functools import partial
 from uuid import uuid4
 
 from rq.compat import as_text, decode_redis_hash, string_types, text_type
 
-from .connections import resolve_connection
 from .exceptions import NoSuchJobError, UnpickleError
 from .local import LocalStack
 from .utils import enum, import_attribute, utcformat, utcnow, utcparse
+from .connections import (transaction, job_key_from_id, children_key_from_id,
+                          parents_key_from_id)
 
 try:
     import cPickle as pickle
@@ -70,15 +70,15 @@ def unpickle(pickled_string):
 #    fq = get_failed_queue(connection=connection)
 #    fq.requeue(job_id)
 #
-
-def get_current_job(connection=None):
-    """Returns the Job instance that is currently being executed.  If this
-    function is invoked from outside a job context, None is returned.
-    """
-    job_id = _job_stack.top
-    if job_id is None:
-        return None
-    return self._storage.get_job(job_id)
+#
+#def get_current_job(connection=None):
+#    """Returns the Job instance that is currently being executed.  If this
+#    function is invoked from outside a job context, None is returned.
+#    """
+#    job_id = _job_stack.top
+#    if job_id is None:
+#        return None
+#    return self._storage.get_job(job_id)
 
 
 class Job(object):
@@ -88,8 +88,8 @@ class Job(object):
 
     # Job construction
     def _new(self, func, args=None, kwargs=None,
-            result_ttl=None, ttl=None, status=None, description=None,
-            depends_on=None, timeout=None, id=None, origin=None, meta=None):
+             result_ttl=None, ttl=None, status=None, description=None,
+             depends_on=None, timeout=None, id=None, origin=None, meta=None):
         """
         Creates a new Job instance for the given function, arguments, and
         keyword arguments.
@@ -140,10 +140,10 @@ class Job(object):
                 self._parent_ids = [tmp.id for tmp in depends_on]
             else:
                 self._parent_ids = ([depends_on.id]
-                                        if isinstance(depends_on, Job)
-                                        else [depends_on])
+                                    if isinstance(depends_on, Job)
+                                    else [depends_on])
 
-        return job
+        return self
 
     @transaction
     def get_status(self):
@@ -315,8 +315,8 @@ class Job(object):
 #        job.refresh()
 #        return job
 
-    def __init__(self, id=None, connection=None):
-        self.connection = resolve_connection(connection)
+    def __init__(self, id=None, storage=None):
+        self._storage = storage
         self._id = id
         self.created_at = utcnow()
         self._data = UNEVALUATED
@@ -439,7 +439,7 @@ class Job(object):
         self.ttl = int(obj.get('ttl')) if obj.get('ttl') else None
         self.meta = unpickle(obj.get('meta')) if obj.get('meta') else {}
 
-    def to_dict(self):
+    def to_dict(self):  # noqa
         """Returns a serialization of the current job instance"""
         obj = {}
         obj['created_at'] = utcformat(self.created_at or utcnow())

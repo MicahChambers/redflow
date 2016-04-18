@@ -2,22 +2,12 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-import uuid
-
-from redis import WatchError
-
-from .compat import as_text, string_types, total_ordering
-from .connections import resolve_connection
-from .defaults import DEFAULT_RESULT_TTL
-from .exceptions import (DequeueTimeout, InvalidJobOperationError,
-                         NoSuchJobError, UnpickleError)
+from .compat import string_types, total_ordering
+from .exceptions import InvalidJobOperationError
 from .job import Job, JobStatus
-from .utils import import_attribute, utcnow
+from .utils import import_attribute, utcnow, compact
+from .keys import queue_key_from_name, transaction, QUEUES_KEY
 
-
-
-def compact(lst):
-    return [item for item in lst if item is not None]
 
 
 @total_ordering
@@ -29,7 +19,7 @@ class Queue(object):
                  job_class=None, storage=None):
         self._storage = storage
         self.name = name
-        self._key = queue_key(name)
+        self._key = queue_key_from_name(name)
         self._default_timeout = default_timeout
         self._async = async
 
@@ -104,8 +94,8 @@ class Queue(object):
         Removes all "dead" jobs from the queue by cycling through it, while
         guaranteeing FIFO semantics.
         """
-        job_ids = self.get_job_ids(offset, length)
-        jobs = {job_id : self._storage.get_job(job_id) for job_id in job_ids]}
+        job_ids = self.get_job_ids()
+        jobs = {job_id: self._storage.get_job(job_id) for job_id in job_ids}
 
         to_keep = [job_id for job_id, job in jobs.items() if job is not None]
         self._storage._delete(self.key)
@@ -149,7 +139,7 @@ class Queue(object):
                 parent._add_child(job.id)
         else:
             # Make sure the queue exists
-            self._storage._sadd(queues_key(self.name), self.key)
+            self._storage._sadd(queue_key_from_name(self.name), self.key)
 
             # enqueue the job
             job.set_status(JobStatus.QUEUED)
@@ -177,7 +167,7 @@ class Queue(object):
         # Create job in memory
         timeout = timeout or self._default_timeout
         job = self.job_class(storage=self._storage)
-        job._new(storage=self._storage, func, args=args, kwargs=kwargs,
+        job._new(storage=self._storage, func=func, args=args, kwargs=kwargs,
                  result_ttl=result_ttl, ttl=ttl, status=JobStatus.QUEUED,
                  description=description, depends_on=depends_on,
                  timeout=timeout, origin=self.name, meta=meta)
@@ -218,8 +208,8 @@ class Queue(object):
                 # Save jobs, queues and registries of jobs that we are about to
                 # enqueue, since after we start writing we can't stop
                 ready_jobs.append(job)
-                ready_queus.append(self._storage.get_queue(job.origin))
-                ready_regs .append(self._storage.get_deferred_registery(job.origin))
+                ready_queues.append(self._storage.get_queue(job.origin))
+                ready_def_regs .append(self._storage.get_deferred_registery(job.origin))
 
         # Remove our children list
         self._storage._delete(job.children_key)
@@ -250,7 +240,6 @@ class Queue(object):
 
             # Todo store at_front in the job so that it skips the line here
             ready_queue.push_job_id(job.id, at_front=False)
-
 
     @transaction
     def _error_job_perform(self, job):
@@ -286,7 +275,7 @@ class Queue(object):
         meta = kwargs.pop('meta', None)
 
         if 'args' in kwargs or 'kwargs' in kwargs:
-            assert args == (), 'Extra positional arguments cannot be used '
+            assert args == (), 'Extra positional arguments cannot be used '\
                 'when using explicit args and kwargs'
             args = kwargs.pop('args', None)
             kwargs = kwargs.pop('kwargs', None)
@@ -318,10 +307,10 @@ class Queue(object):
         return '<Queue {0!r}>'.format(self.name)
 
     def clean_registries(self):
-        """Cleans StartedJobRegistry and FinishedJobRegistry of a queue."""
-        registry = FinishedJobRegistry(name=self.name, storage=self._storage)
+        """ Cleans StartedJobRegistry and FinishedJobRegistry of a queue. """
+        registry = self._storage.get_finished_registry(name=self.name)
         registry.cleanup()
-        registry = StartedJobRegistry(name=self.name, storage=self._storage)
+        registry = self._storage.get_started_registry(name=self.name)
         registry.cleanup()
 
 

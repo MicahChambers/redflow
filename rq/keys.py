@@ -5,10 +5,10 @@ SUSPENDED_KEY = 'rq:suspended'
 REDIS_QUEUE_NAMESPACE_PREFIX = 'rq:queue:'
 REDIS_JOB_NAMESPACE_PREFIX = 'rq:job:'
 
-def queue_key(name):
+def queue_key_from_name(name):
     return REDIS_QUEUE_NAMESPACE_PREFIX + name
 
-def queue_name(key):
+def queue_name_from_key(key):
     assert key.startswith(REDIS_QUEUE_NAMESPACE_PREFIX)
     return key[REDIS_QUEUE_NAMESPACE_PREFIX:]
 

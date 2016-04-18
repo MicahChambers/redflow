@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
+from functools import wraps
+from redis import StrictRedis, WatchError, StrictPipeline, Pipeline
 
-from contextlib import contextmanager
-
-from redis import StrictRedis
-
-from .compat.connections import patch_connection
-from .local import LocalStack, release_local
+from .compat import string_types, as_text
+from .utils import import_attribute, compact
+from .keys import (QUEUES_KEY, queue_name_from_key, worker_key_from_name,
+                   WORKERS_KEY, queue_key_from_name)
 
 
 class NoRedisConnectionException(Exception):
@@ -43,7 +43,7 @@ def transaction(wrapped):
                         out = self.wrapped(*args, **kwargs)
                         pipe.execute()
 
-                    except WatchError as exc:
+                    except WatchError:
                         pass
 
                 # transaction successful!
@@ -53,6 +53,9 @@ def transaction(wrapped):
 
 
 class RQConnection(object):
+    from .queue import Queue
+    from .job import Job
+
     queue_class = Queue
     job_class = Job
 
@@ -95,7 +98,7 @@ class RQConnection(object):
         """
         assert self._pipe is not None
         self._pipe.watch(QUEUES_KEY)
-        return [queue_name(rq_key) for rq_key in
+        return [queue_name_from_key(rq_key) for rq_key in
                 self._smembers(QUEUES_KEY) if rq_key]
 
     def mkqueue(self, name):
@@ -113,6 +116,7 @@ class RQConnection(object):
 
         Note: no database interaction takes place here
         """
+        from .registry import DeferredJobRegistry
         return DeferredJobRegistry(name, storage=self)
 
     def get_started_registry(self, name):
@@ -120,6 +124,7 @@ class RQConnection(object):
 
         Note: no database interaction takes place here
         """
+        from .registry import StartedJobRegistry
         return StartedJobRegistry(name, storage=self)
 
     def get_finished_registry(self, name):
@@ -127,10 +132,12 @@ class RQConnection(object):
 
         Note: no database interaction takes place here
         """
+        from .registry import FinishedJobRegistry
         return FinishedJobRegistry(name, storage=self)
 
     def get_failed_queue(self):
         """Returns a handle to the special failed queue."""
+        from .queue import FailedQueue
         return FailedQueue(storage=self)
 
     @transaction
@@ -138,30 +145,29 @@ class RQConnection(object):
         """
         Returns a Worker instance
         """
+        from .worker import Worker
+
         worker_key = worker_key_from_name(name)
-        if not self._storage._exists(worker_key):
-            self._storage._srem(WORKERS_KEY, worker_key)
+        if not self._exists(worker_key):
+            self._srem(WORKERS_KEY, worker_key)
             return None
 
-        Worker(name
-        worker = cls([], name, connection=connection)
-        queues = as_text(connection.hget(worker.key, 'queues'))
-        worker._state = as_text(connection.hget(worker.key, 'state') or '?')
-        worker._job_id = connection.hget(worker.key, 'current_job') or None
+        worker = Worker(name, storage=self)
+        queues = as_text(self._hget(worker.key, 'queues'))
+        worker._state = as_text(self._hget(worker.key, 'state') or '?')
+        worker._job_id = self._hget(worker.key, 'current_job') or None
         if queues:
-            worker.queues = [cls.queue_class(queue, connection=connection)
+            worker.queues = [self.mkqueue(queue, storage=self)
                              for queue in queues.split(',')]
         return worker
 
+    @transaction
     def get_all_workers(self):
         """
         Returns an iterable of all Workers.
         """
-        if connection is None:
-            connection = get_current_connection()
-        reported_working = connection.smembers(cls.redis_workers_keys)
-        workers = [cls.find_by_key(as_text(key), connection)
-                   for key in reported_working]
+        reported_working = self._storage._smembers(WORKERS_KEY)
+        workers = [self.get_worker(name) for name in reported_working]
         return compact(workers)
 
     @transaction
@@ -182,7 +188,7 @@ class RQConnection(object):
         """
         job_id = None
         for ii, queue in enumerate(queues):
-            if not isinstance(queue, Queue):
+            if not isinstance(queue, self.queue_class):
                 queue = self.get_queue(queue)
 
             if queue.count() > 0:
@@ -213,16 +219,16 @@ class RQConnection(object):
         # way around it, other than busy waiting
         keys = []
         for queue in queues:
-            if isinstance(queue, Queue):
-                keys.append(queue_key(queue.name))
+            if isinstance(queue, self.queue_class):
+                keys.append(queue_key_from_name(queue.name))
             else:
-                keys.append(queue_key(queue))
+                keys.append(queue_key_from_name(queue))
 
         result = self._redis_conn.blpop(keys)
 
         if result:
             queue_key, job_id = result
-            reg = self.get_started_registry(queue_name(queue_key))
+            reg = self.get_started_registry(queue_name_from_key(queue_key))
             reg.add(job_id)
             return job_id
         else:
@@ -236,10 +242,10 @@ class RQConnection(object):
         :param timeout: How long to wait for a job to appear on one of the
                queues (if they are initially empty). None waits forever.
         """
-        job_id = wait_for_next_job_id(queues, timeout)
+        job_id = self.wait_for_next_job_id(queues, timeout)
         return self.get_job(job_id)
 
-    def _active_transaction():
+    def _active_transaction(self):
         return self._pipe is not None
 
     ### Write ###

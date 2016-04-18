@@ -20,6 +20,7 @@ class CustomJob(Job):
 class TestQueue(RQTestCase):
     def test_create_queue(self):
         """Creating queues."""
+        import ipdb; ipdb.set_trace()
         with RQConnection() as conn:
             q = conn.mkqueue('my-queue')
             self.assertEqual(q.name, 'my-queue')
