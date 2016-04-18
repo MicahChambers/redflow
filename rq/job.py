@@ -54,22 +54,22 @@ def unpickle(pickled_string):
     return obj
 
 
-def cancel_job(job_id, connection=None):
-    """Cancels the job with the given job ID, preventing execution.  Discards
-    any job info (i.e. it can't be requeued later).
-    """
-    Job(job_id, connection=connection).cancel()
-
-
-def requeue_job(job_id, connection=None):
-    """Requeues the job with the given job ID.  If no such job exists, just
-    remove the job ID from the failed queue, otherwise the job ID should refer
-    to a failed job (i.e. it should be on the failed queue).
-    """
-    from .queue import get_failed_queue
-    fq = get_failed_queue(connection=connection)
-    fq.requeue(job_id)
-
+#def cancel_job(job_id, connection=None):
+#    """Cancels the job with the given job ID, preventing execution.  Discards
+#    any job info (i.e. it can't be requeued later).
+#    """
+#    Job(job_id, connection=connection).cancel()
+#
+#
+#def requeue_job(job_id, connection=None):
+#    """Requeues the job with the given job ID.  If no such job exists, just
+#    remove the job ID from the failed queue, otherwise the job ID should refer
+#    to a failed job (i.e. it should be on the failed queue).
+#    """
+#    from .queue import get_failed_queue
+#    fq = get_failed_queue(connection=connection)
+#    fq.requeue(job_id)
+#
 
 def get_current_job(connection=None):
     """Returns the Job instance that is currently being executed.  If this
@@ -503,6 +503,10 @@ class Job(object):
         self.cancel()
         self._storage._delete(self.key)
         self._storage._delete(self.children_key)
+        # TODO remove from queue
+        # TODO remove from failed queue
+        #self._storage._lrem(queue_key(self.origin), 0, self.id)
+        #self._storage._lrem(queue_key(JobStatus.FAILED), 0, self.id)
 
     # Job execution
     def perform(self):  # noqa

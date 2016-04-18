@@ -1,11 +1,9 @@
 
-REDIS_QUEUES_KEYS = 'rq:queues'
+QUEUES_KEY = 'rq:queues'
+WORKERS_KEY = 'rq:workers'
+SUSPENDED_KEY = 'rq:suspended'
 REDIS_QUEUE_NAMESPACE_PREFIX = 'rq:queue:'
-
 REDIS_JOB_NAMESPACE_PREFIX = 'rq:job:'
-
-def queues_key():
-    return REDIS_QUEUES_KEYS
 
 def queue_key(name):
     return REDIS_QUEUE_NAMESPACE_PREFIX + name
@@ -35,3 +33,6 @@ def finished_registry_key_from_name(name):
 
 def deferred_registry_key_from_name(name):
     return 'rq:deferred:{0}'.format(name)
+
+def worker_key_from_name(name):
+    return 'rq:worker:{}'.format(name)

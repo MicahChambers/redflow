@@ -53,8 +53,21 @@ def transaction(wrapped):
 
 
 class RQConnection(object):
+    queue_class = Queue
+    job_class = Job
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, job_class=None, queue_class=None, *args, **kwargs):
+
+        if job_class is not None:
+            if isinstance(job_class, string_types):
+                job_class = import_attribute(job_class)
+            self.job_class = job_class
+
+        if queue_class is not None:
+            if isinstance(queue_class, string_types):
+                queue_class = import_attribute(queue_class)
+            self.queue_class = queue_class
+
         if 'redis' in kwargs:
             self._redis_conn = kwargs['redis']
         else:
@@ -81,30 +94,150 @@ class RQConnection(object):
         Returns an iterable of all Queues.
         """
         assert self._pipe is not None
-        self._pipe.watch(queues_key())
+        self._pipe.watch(QUEUES_KEY)
         return [queue_name(rq_key) for rq_key in
-                self._smembers(queues_key()) if rq_key]
+                self._smembers(QUEUES_KEY) if rq_key]
 
     def mkqueue(self, name):
         """
         Get a queue by name, note: this does not actually do a remote check. Do
         that call sync().
         """
-        name = queue_key[len(prefix):]
-        from rq.queue import Queue
-        return Queue(name, storage=self)
+        return self.queue_class(name, storage=self)
 
     def get_queue(self, name):
         return self.mkqueue(name)
 
     def get_deferred_registery(self, name):
-        return DeferredJobRegistry(self.origin, storage=self)
+        """
+
+        Note: no database interaction takes place here
+        """
+        return DeferredJobRegistry(name, storage=self)
+
+    def get_started_registry(self, name):
+        """
+
+        Note: no database interaction takes place here
+        """
+        return StartedJobRegistry(name, storage=self)
+
+    def get_finished_registry(self, name):
+        """
+
+        Note: no database interaction takes place here
+        """
+        return FinishedJobRegistry(name, storage=self)
+
+    def get_failed_queue(self):
+        """Returns a handle to the special failed queue."""
+        return FailedQueue(storage=self)
+
+    @transaction
+    def get_worker(self, name):
+        """
+        Returns a Worker instance
+        """
+        worker_key = worker_key_from_name(name)
+        if not self._storage._exists(worker_key):
+            self._storage._srem(WORKERS_KEY, worker_key)
+            return None
+
+        Worker(name
+        worker = cls([], name, connection=connection)
+        queues = as_text(connection.hget(worker.key, 'queues'))
+        worker._state = as_text(connection.hget(worker.key, 'state') or '?')
+        worker._job_id = connection.hget(worker.key, 'current_job') or None
+        if queues:
+            worker.queues = [cls.queue_class(queue, connection=connection)
+                             for queue in queues.split(',')]
+        return worker
+
+    def get_all_workers(self):
+        """
+        Returns an iterable of all Workers.
+        """
+        if connection is None:
+            connection = get_current_connection()
+        reported_working = connection.smembers(cls.redis_workers_keys)
+        workers = [cls.find_by_key(as_text(key), connection)
+                   for key in reported_working]
+        return compact(workers)
 
     @transaction
     def get_job(self, job_id):
-        job = Job(job_id, storage=self)
+        job = self.job_class(job_id, storage=self)
         job.refresh()
         return job
+
+    @transaction
+    def get_next_job_id(self, queues):
+        """
+        Non-blocking dequeue of the next job. Job is atomically moved to running
+        registry for the queue
+
+        :param queues: list of queue names or queue objects
+        :param timeout: How long to wait for a job to appear on one of the
+               queues (if they are initially empty). None waits forever.
+        """
+        job_id = None
+        for ii, queue in enumerate(queues):
+            if not isinstance(queue, Queue):
+                queue = self.get_queue(queue)
+
+            if queue.count() > 0:
+                reg = self.get_started_registry(queue.name)
+                job_id = as_text(self._lpop(queue.key))
+                reg.add(job_id)
+                break
+
+        return job_id
+
+    def wait_for_next_job_id(self, queues, timeout=None):
+        """
+        Non-blocking dequeue of the next job. Job is moved to running registry
+        for the queue.
+
+        :param queues: list of queue names or queue objects
+        :param timeout: How long to wait for a job to appear on one of the
+               queues (if they are initially empty). None waits forever.
+        """
+        if timeout == 0:
+            return self.get_next_job(queues)
+
+        # Since timeout is > 0, we can use blplop. Unfortunately there is no way
+        # to atomically move from a queue to a set (maybe StartedJobRegistry
+        # should be a simple list). So there is a *tiny* window of time that
+        # this job will be only stored locally in memory. Generally this sort of
+        # circumstance is to be avoided but in this case there doesn't seem a
+        # way around it, other than busy waiting
+        keys = []
+        for queue in queues:
+            if isinstance(queue, Queue):
+                keys.append(queue_key(queue.name))
+            else:
+                keys.append(queue_key(queue))
+
+        result = self._redis_conn.blpop(keys)
+
+        if result:
+            queue_key, job_id = result
+            reg = self.get_started_registry(queue_name(queue_key))
+            reg.add(job_id)
+            return job_id
+        else:
+            return None
+
+    def dequeue_any(self, queues, timeout):
+        """
+        Dequeue a single job. Unlike RQ we expect all jobs to exist
+
+        :param queues: list of queue names or queue objects
+        :param timeout: How long to wait for a job to appear on one of the
+               queues (if they are initially empty). None waits forever.
+        """
+        job_id = wait_for_next_job_id(queues, timeout)
+        return self.get_job(job_id)
 
     def _active_transaction():
         return self._pipe is not None
@@ -231,6 +364,13 @@ class RQConnection(object):
     def _hgetall(self, name):
         self._pipe.watch(name)
         return self._pipe.hgetall(name)
+
+    # Read / Then Write. BE WARY THIS CAN ONLY BE USED 1 TIME PER PIPE
+    def _lpop(self, name):
+        self._pipe.watch(name)
+        out = self._pipe.lindex(name, 0)
+        self._pipe.multi()
+        return out
 
 __all__ = ['RQConnection', 'transaction']
 
