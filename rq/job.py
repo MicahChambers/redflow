@@ -11,8 +11,8 @@ from rq.compat import as_text, decode_redis_hash, string_types, text_type
 from .exceptions import NoSuchJobError, UnpickleError
 from .local import LocalStack
 from .utils import enum, import_attribute, utcformat, utcnow, utcparse
-from .connections import (transaction, job_key_from_id, children_key_from_id,
-                          parents_key_from_id)
+from .connections import transaction
+from .keys import job_key_from_id, children_key_from_id, parents_key_from_id
 
 try:
     import cPickle as pickle
