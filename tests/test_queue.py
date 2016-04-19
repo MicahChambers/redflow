@@ -156,7 +156,7 @@ class TestQueue(RQTestCase):
 
         # Pop it off the queue...
         self.assertEqual(q.count, 1)
-        self.assertEqual(self.conn.pop_job_id(q, 0), uuid)
+        self.assertEqual(self.conn._pop_job_id(q)[0], uuid)
 
         # ...and assert the queue count when down
         self.assertEqual(q.count, 0)
@@ -233,11 +233,11 @@ class TestQueue(RQTestCase):
         fooq = self.conn.mkqueue('foo')
         barq = self.conn.mkqueue('bar')
 
-        self.assertEqual(Queue.dequeue_any([fooq, barq], None), None)
+        self.assertEqual(self.conn.dequeue_any([fooq, barq]), None)
 
         # Enqueue a single item
         barq.enqueue(say_hello)
-        job, queue = Queue.dequeue_any([fooq, barq], None)
+        job, queue = self.conn.dequeue_any([fooq, barq])
         self.assertEqual(job.func, say_hello)
         self.assertEqual(queue, barq)
 
@@ -245,14 +245,14 @@ class TestQueue(RQTestCase):
         barq.enqueue(say_hello, 'for Bar')
         fooq.enqueue(say_hello, 'for Foo')
 
-        job, queue = Queue.dequeue_any([fooq, barq], None)
+        job, queue = self.conn.dequeue_any([fooq, barq])
         self.assertEqual(queue, fooq)
         self.assertEqual(job.func, say_hello)
         self.assertEqual(job.origin, fooq.name)
         self.assertEqual(job.args[0], 'for Foo',
                          'Foo should be dequeued first.')
 
-        job, queue = Queue.dequeue_any([fooq, barq], None)
+        job, queue = self.conn.dequeue_any([fooq, barq])
         self.assertEqual(queue, barq)
         self.assertEqual(job.func, say_hello)
         self.assertEqual(job.origin, barq.name)
@@ -268,8 +268,8 @@ class TestQueue(RQTestCase):
 
         # Dequeue simply ignores the missing job and returns None
         self.assertEqual(q.count, 1)
-        self.assertEqual(Queue.dequeue_any([self.conn.mkqueue(), self.conn.mkqueue('low')], None),  # noqa
-                None)
+        self.assertEqual(self.conn.dequeue_any(
+            [self.conn.mkqueue(), self.conn.mkqueue('low')]), None) # noqa
         self.assertEqual(q.count, 0)
 
     def test_enqueue_sets_status(self):
@@ -524,7 +524,7 @@ class TestFailedQueue(RQTestCase):
     def test_custom_job_class(self):
         """Ensure custom job class assignment works as expected."""
         conn = RQConnection(self.testconn, job_class=CustomJob)
-        q = self.conn.mkqueue()
+        q = conn.mkqueue()
         self.assertEqual(q.job_class, CustomJob)
 
     def test_skip_queue(self):

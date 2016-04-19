@@ -261,7 +261,7 @@ def transaction(wrapped):
         assert isinstance(self._storage, RQConnection)
 
         if self._storage._active_transaction():
-            return wrapped(self, *args, **kwargs)
+            out = wrapped(self, *args, **kwargs)
         else:
             with self._storage._pipeline() as pipe:
                 self._storage._pipe = pipe
@@ -271,8 +271,10 @@ def transaction(wrapped):
                         pipe.execute()
 
                     except WatchError:
-                        import ipdb; ipdb.set_trace()
                         pass
+                    except:
+                        self._storage._pipe = None
+                        raise
                     else:
                         break
 

@@ -3,12 +3,14 @@ from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 from redis.client import StrictRedis, StrictPipeline, Pipeline
 from contextlib import contextmanager
+import time
+import math
 
 from .compat import string_types, as_text
 from .utils import import_attribute, compact, transaction
 from .keys import (QUEUES_KEY, queue_name_from_key, worker_key_from_name,
                    WORKERS_KEY, queue_key_from_name)
-
+from .exceptions import NoSuchJobError
 
 class NoRedisConnectionException(Exception):
     pass
@@ -60,7 +62,8 @@ class RQConnection(object):
         Get a queue by name, note: this does not actually do a remote check. Do
         that call sync().
         """
-        return self.queue_class(name, storage=self, async=async)
+        return self.queue_class(name, storage=self, async=async,
+                                job_class=self.job_class)
 
     def get_queue(self, name, async=True):
         return self.mkqueue(name, async=async)
@@ -151,7 +154,7 @@ class RQConnection(object):
                queues (if they are initially empty). None waits forever.
         """
         job_id = None
-        ret_queue = None
+        ret_queue_name = None
         for ii, queue in enumerate(queues):
             if not isinstance(queue, self.queue_class):
                 queue = self.get_queue(queue)
@@ -165,7 +168,7 @@ class RQConnection(object):
 
         return job_id, ret_queue_name
 
-    def _pop_job_id(self, queues, timeout=None):
+    def _pop_job_id(self, queues, timeout=0):
         """
         Non-blocking dequeue of the next job. Job is moved to running registry
         for the queue.
@@ -173,6 +176,7 @@ class RQConnection(object):
         :param queues: list of queue names or queue objects
         :param timeout: How long to wait for a job to appear on one of the
                queues (if they are initially empty). None waits forever.
+        :return (job_id, queue_name)
         """
         if timeout == 0:
             return self._pop_job_id_no_wait(queues)
@@ -191,7 +195,7 @@ class RQConnection(object):
             else:
                 keys.append(queue_key_from_name(queue))
 
-        result = self._redis_conn.blpop(keys)
+        result = self._redis_conn.blpop(keys, int(math.ceil(timeout)))
 
         if result:
             queue_key, job_id = result
@@ -201,7 +205,7 @@ class RQConnection(object):
         else:
             return None, None
 
-    def dequeue_any(self, queues, timeout):
+    def dequeue_any(self, queues, timeout=0):
         """
         Dequeue a single job. Unlike RQ we expect all jobs to exist
 
@@ -209,12 +213,20 @@ class RQConnection(object):
         :param timeout: How long to wait for a job to appear on one of the
                queues (if they are initially empty). None waits forever.
         """
-        job_id, queue_name = self._pop_job_id(queues, timeout)
 
-        if job_id is not None:
-            return self.get_job(job_id), self.mkqueue(queue_name)
-        else:
-            return None
+        while True:
+            start_time = time.time()
+            job_id, queue_name = self._pop_job_id(queues, timeout=timeout)
+
+            if job_id is not None:
+                try:
+                    return self.get_job(job_id), self.mkqueue(queue_name)
+                except NoSuchJobError:
+                    # If we find a job that doesn't exist, try again with timeout
+                    # reduced
+                    timeout = max(0, timeout - (time.time() - start_time))
+            else:
+                return None
 
     def _active_transaction(self):
         return self._pipe is not None
@@ -368,6 +380,7 @@ class RQConnection(object):
         self._pipe.watch(name)
         out = self._pipe.lindex(name, 0)
         self._pipe.multi()
+        self._pipe.lpop(name)
         return out
 
     @contextmanager

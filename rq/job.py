@@ -11,7 +11,8 @@ from rq.compat import as_text, decode_redis_hash, string_types, text_type
 from .exceptions import NoSuchJobError, UnpickleError
 from .local import LocalStack
 from .utils import enum, import_attribute, utcformat, utcnow, utcparse, transaction
-from .keys import job_key_from_id, children_key_from_id, parents_key_from_id
+from .keys import (job_key_from_id, children_key_from_id, parents_key_from_id,
+                   queue_key_from_name)
 
 try:
     import cPickle as pickle
@@ -483,8 +484,7 @@ class Job(object):
         cancellation.
         """
         if self.origin:
-            queue = self._storage.mkqueue(self.origin)
-            queue.remove(self)
+            self._storage._lrem(queue_key_from_name(self.origin), 1, self.id)
 
     @transaction
     def delete(self):
