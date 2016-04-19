@@ -304,21 +304,6 @@ class Job(object):
         self._kwargs = value
         self._data = UNEVALUATED
 
-#    @classmethod
-#    def exists(cls, job_id, connection=None):
-#        """Returns whether a job hash exists for the given job ID."""
-#        conn = resolve_connection(connection)
-#        return conn.exists(cls.key_for(job_id))
-#
-#    @classmethod
-#    def fetch(cls, id, connection=None):
-#        """Fetches a persisted job from its corresponding Redis key and
-#        instantiates it.
-#        """
-#        job = cls(id, connection=connection)
-#        job.refresh()
-#        return job
-
     def __init__(self, id=None, storage=None):
         self._storage = storage
         self._id = id
@@ -571,7 +556,7 @@ class Job(object):
                 # enqueue, since after we start writing we can't stop
                 ready_jobs.append(child)
                 ready_queues.append(self._storage.get_queue(child.origin))
-                ready_def_regs.append(self._storage.get_deferred_registery(child.origin))
+                ready_def_regs.append(self._storage.get_deferred_registry(child.origin))
 
         # since job still isn't ready, just remove ourselves from the parents
         # list, so it is clear that we (the current job) isn't blocking. Since

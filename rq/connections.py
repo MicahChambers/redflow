@@ -46,7 +46,7 @@ class RQConnection(object):
         self._storage = self
         self._pipe = None
 
-    def all_queues(self):
+    def get_all_queues(self):
         """
         Returns an iterable of all Queues.
         """
@@ -65,7 +65,7 @@ class RQConnection(object):
     def get_queue(self, name, async=True):
         return self.mkqueue(name, async=async)
 
-    def get_deferred_registery(self, name):
+    def get_deferred_registry(self, name):
         """
 
         Note: no database interaction takes place here
@@ -130,8 +130,18 @@ class RQConnection(object):
         job.refresh()
         return job
 
+    def _create_job(self, *args, **kwargs):
+        """
+        Mostly used for testing and as a helper. Creates a job object and
+        initializes it, but doesn't put it on a queue.
+        """
+        from .job import Job
+        job = Job(storage=self)
+        job._new(*args, **kwargs)
+        return job
+
     @transaction
-    def get_next_job_id(self, queues):
+    def _pop_job_id_no_wait(self, queues):
         """
         Non-blocking dequeue of the next job. Job is atomically moved to running
         registry for the queue
@@ -153,7 +163,7 @@ class RQConnection(object):
 
         return job_id
 
-    def wait_for_next_job_id(self, queues, timeout=None):
+    def pop_job_id(self, queues, timeout=None):
         """
         Non-blocking dequeue of the next job. Job is moved to running registry
         for the queue.
@@ -163,7 +173,7 @@ class RQConnection(object):
                queues (if they are initially empty). None waits forever.
         """
         if timeout == 0:
-            return self.get_next_job(queues)
+            return self._pop_job_id_no_wait(queues)
 
         # Since timeout is > 0, we can use blplop. Unfortunately there is no way
         # to atomically move from a queue to a set (maybe StartedJobRegistry

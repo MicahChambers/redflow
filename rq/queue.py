@@ -150,7 +150,7 @@ class Queue(object):
 
         # check if all parents are done
         parents_remaining = job._unfinished_parents()
-        deferred = self._storage.get_deferred_registery(self.name)
+        deferred = self._storage.get_deferred_registry(self.name)
 
         # save the job
         job.save()
