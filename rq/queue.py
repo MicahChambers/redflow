@@ -3,10 +3,10 @@ from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
 from .compat import string_types, total_ordering
-from .exceptions import InvalidJobOperationError
+from .exceptions import InvalidJobOperationError, NoSuchJobError
 from .job import Job, JobStatus
-from .utils import import_attribute, utcnow, compact
-from .keys import queue_key_from_name, transaction, QUEUES_KEY
+from .utils import import_attribute, utcnow, compact, transaction
+from .keys import queue_key_from_name, QUEUES_KEY
 
 
 
@@ -42,10 +42,19 @@ class Queue(object):
     @transaction
     def empty(self):
         job_ids = self._storage._lrange(self.key, 0, -1)
+        jobs = []
         for job_id in job_ids:
-            job = self._storage.get_job(job_id)
+            try:
+                job = self._storage.get_job(job_id)
+                jobs.append(job)
+            except NoSuchJobError:
+                pass
+
+        for job in jobs:
             job.delete()
-        return len(job_ids)
+
+        self._storage._delete(self.key)
+        return len(jobs)
 
     def is_empty(self):
         """Returns whether the current queue is empty."""
@@ -77,8 +86,8 @@ class Queue(object):
         """Returns a list of all (valid) jobs in the queue."""
         return self.get_jobs()
 
-    @transaction
     @property
+    @transaction
     def count(self):
         """Returns a count of all messages in the queue."""
         return self._storage._llen(self.key)
@@ -133,13 +142,13 @@ class Queue(object):
         if len(parents_remaining) > 0:
             # Update deferred registry, parent's children set and job
             job.set_status(JobStatus.DEFERRED)
-            deferred.add(job.id)
+            deferred.add(job)
 
             for parent in parents_remaining:
                 parent._add_child(job.id)
         else:
             # Make sure the queue exists
-            self._storage._sadd(queue_key_from_name(self.name), self.key)
+            self._storage._sadd(QUEUES_KEY, self.key)
 
             # enqueue the job
             job.set_status(JobStatus.QUEUED)
@@ -167,7 +176,7 @@ class Queue(object):
         # Create job in memory
         timeout = timeout or self._default_timeout
         job = self.job_class(storage=self._storage)
-        job._new(storage=self._storage, func=func, args=args, kwargs=kwargs,
+        job._new(func=func, args=args, kwargs=kwargs,
                  result_ttl=result_ttl, ttl=ttl, status=JobStatus.QUEUED,
                  description=description, depends_on=depends_on,
                  timeout=timeout, origin=self.name, meta=meta)
@@ -176,74 +185,9 @@ class Queue(object):
             self._enqueue_or_deferr_job(job, at_front=at_front)
         else:
             assert len(job._unfinished_parents()) == 0
-            self._setup_job_perform(job)
-            try:
-                job.perform()
-            except:
-                self._finish_job_perform(job)
-            else:
-                self._error_job_perform(job)
+            job.perform()
 
         return job
-
-    @transaction
-    def _setup_job_perform(self, job):
-        self._storage._persist(job.key)
-
-    @transaction
-    def _finish_job_perform(self, job):
-        # Now that the job is finished, check its dependents (children) to see
-        # which are ready to start
-
-        ready_jobs = []
-        ready_queues = []
-        ready_def_regs = []
-        non_ready_jobs = []
-
-        for job_id in self._storage._smembers(job.children_key):
-            job = self._storage.get_job(job_id)
-            if job.has_unmet_dependencies():
-                non_ready_jobs.append(job)
-            else:
-                # Save jobs, queues and registries of jobs that we are about to
-                # enqueue, since after we start writing we can't stop
-                ready_jobs.append(job)
-                ready_queues.append(self._storage.get_queue(job.origin))
-                ready_def_regs .append(self._storage.get_deferred_registery(job.origin))
-
-        # Remove our children list
-        self._storage._delete(job.children_key)
-
-        # since job still isn't ready, just remove ourselves from the parents
-        # list, so it is clear that we (the current job) isn't blocking. Since
-        # these jobs are already deferred no need to modify the registry,
-        # queue or job itself
-        for non_ready_job in non_ready_jobs:
-            non_ready_job._remove_parent(job.id)
-
-        # These jobs are ready so they don't have any parents anymore -- that
-        # key can be removed. The jobs queue should have the job_id added and
-        # deferred
-        for ready_job, ready_queue, ready_def_reg in zip(ready_jobs, ready_queues,
-                                                         ready_def_regs):
-
-            ready_job._remove_parents()
-            ready_def_reg.remove(ready_job.id)
-
-            # enqueue the job
-            ready_job.set_status(JobStatus.QUEUED)
-            ready_job.enqueued_at = utcnow()
-            if ready_job.timeout is None:
-                ready_job.timeout = ready_queue.DEFAULT_TIMEOUT
-
-            job.save()
-
-            # Todo store at_front in the job so that it skips the line here
-            ready_queue.push_job_id(job.id, at_front=False)
-
-    @transaction
-    def _error_job_perform(self, job):
-        self.set_status(JobStatus.FAILED)
 
     def enqueue(self, f, *args, **kwargs):
         """Creates a job to represent the delayed function call and enqueues
@@ -270,7 +214,6 @@ class Queue(object):
         result_ttl = kwargs.pop('result_ttl', None)
         ttl = kwargs.pop('ttl', None)
         depends_on = kwargs.pop('depends_on', None)
-        job_id = kwargs.pop('job_id', None)
         at_front = kwargs.pop('at_front', False)
         meta = kwargs.pop('meta', None)
 
@@ -283,7 +226,7 @@ class Queue(object):
         return self.enqueue_call(func=f, args=args, kwargs=kwargs,
                                  timeout=timeout, result_ttl=result_ttl, ttl=ttl,
                                  description=description, depends_on=depends_on,
-                                 job_id=job_id, at_front=at_front, meta=meta)
+                                 at_front=at_front, meta=meta)
 
     # Total ordering defition (the rest of the required Python methods are
     # auto-generated by the @total_ordering decorator)

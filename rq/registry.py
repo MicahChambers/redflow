@@ -1,8 +1,10 @@
 from .compat import as_text
-from .exceptions import NoSuchJobError
-from .job import Job, JobStatus
+from .job import JobStatus
 from .queue import FailedQueue
-from .utils import current_timestamp
+from .utils import current_timestamp, transaction
+from .keys import (started_registry_key_from_name,
+                   finished_registry_key_from_name,
+                   deferred_registry_key_from_name)
 
 
 class BaseRegistry(object):
@@ -20,8 +22,8 @@ class BaseRegistry(object):
         """Returns the number of jobs in this registry"""
         return self.count
 
-    @transaction
     @property
+    @transaction
     def count(self):
         """Returns the number of jobs in this registry"""
         self.cleanup()
@@ -58,6 +60,7 @@ class BaseRegistry(object):
 
     def cleanup(self):
         raise NotImplemented("BaseRegistry has no cleanup() implemented!")
+
 
 class StartedJobRegistry(BaseRegistry):
     """

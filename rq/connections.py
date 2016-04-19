@@ -1,55 +1,17 @@
 # -*- coding: utf-8 -*-
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
-from functools import wraps
-from redis.client import StrictRedis, WatchError, StrictPipeline, Pipeline
+from redis.client import StrictRedis, StrictPipeline, Pipeline
+from contextlib import contextmanager
 
 from .compat import string_types, as_text
-from .utils import import_attribute, compact
+from .utils import import_attribute, compact, transaction
 from .keys import (QUEUES_KEY, queue_name_from_key, worker_key_from_name,
                    WORKERS_KEY, queue_key_from_name)
 
 
 class NoRedisConnectionException(Exception):
     pass
-
-
-def transaction(wrapped):
-    """
-    If the specified RQConnection already contains a transaction use it,
-    otherwise, create a new transaction, which will end at the end of the
-    wrapped function.  The entire function will be retried in case of WatchError
-    error.
-
-    Usage:
-
-    >>> @transaction
-    >>> def foo(self, arg):
-    >>>     blah
-    """
-
-    @wraps(wrapped)
-    def func(self, *args, **kwargs):
-        assert hasattr(self, '_storage')
-        assert isinstance(self._storage, RQConnection)
-
-        if self._storage._active_transaction():
-            return wrapped(self, *args, **kwargs)
-        else:
-            with self._storage.pipline() as pipe:
-                self._storage._pipe = pipe
-                while True:
-                    try:
-                        out = self.wrapped(*args, **kwargs)
-                        pipe.execute()
-
-                    except WatchError:
-                        pass
-
-                # transaction successful!
-                self._storage._pipe = None
-
-        return out
 
 
 class RQConnection(object):
@@ -59,7 +21,8 @@ class RQConnection(object):
     queue_class = Queue
     job_class = Job
 
-    def __init__(self, job_class=None, queue_class=None, *args, **kwargs):
+    def __init__(self, redis_conn=None, redis_kwargs={}, job_class=None,
+                 queue_class=None):
 
         if job_class is not None:
             if isinstance(job_class, string_types):
@@ -71,10 +34,10 @@ class RQConnection(object):
                 queue_class = import_attribute(queue_class)
             self.queue_class = queue_class
 
-        if 'redis' in kwargs:
-            self._redis_conn = kwargs['redis']
+        if redis_conn:
+            self._redis_conn = redis_conn
         else:
-            self._redis_conn = StrictRedis(*args, **kwargs)
+            self._redis_conn = StrictRedis(**redis_kwargs)
 
         if not isinstance(self._redis_conn, StrictRedis):
             raise ValueError("redis argument to Connection must be of type "
@@ -82,15 +45,6 @@ class RQConnection(object):
 
         self._storage = self
         self._pipe = None
-
-    def __enter__(self):
-        assert self._pipe is None
-        self._pipe = self._redis_conn.pipeline()
-
-    def __exit(self, type, value, traceback):
-        pipe = self._pipe
-        self._pipe = None
-        pipe.execute()
 
     def all_queues(self):
         """
@@ -101,15 +55,15 @@ class RQConnection(object):
         return [queue_name_from_key(rq_key) for rq_key in
                 self._smembers(QUEUES_KEY) if rq_key]
 
-    def mkqueue(self, name):
+    def mkqueue(self, name='default', async=True):
         """
         Get a queue by name, note: this does not actually do a remote check. Do
         that call sync().
         """
-        return self.queue_class(name, storage=self)
+        return self.queue_class(name, storage=self, async=async)
 
-    def get_queue(self, name):
-        return self.mkqueue(name)
+    def get_queue(self, name, async=True):
+        return self.mkqueue(name, async=async)
 
     def get_deferred_registery(self, name):
         """
@@ -250,21 +204,21 @@ class RQConnection(object):
 
     ### Write ###
     def _hset(self, name, key, value):
-        self._pipe.multi()
+        if not self._pipe.explicit_transaction: self._pipe.multi()
         self._pipe.hset(name, key, value)
 
     def _setex(self, name, time, value):
         """
         Use keyword arguments so that non-strict version acts the same
         """
-        self._pipe.multi()
+        if not self._pipe.explicit_transaction: self._pipe.multi()
         self._pipe.setex(name=name, time=time, value=value)
 
     def _lrem(self, name, count, value):
         """
         Patched count->num for non-strict version
         """
-        self._pipe.multi()
+        if not self._pipe.explicit_transaction: self._pipe.multi()
 
         if isinstance(self._pipe, StrictPipeline):
             # name, count, value
@@ -279,44 +233,48 @@ class RQConnection(object):
         Patched to handle [score0, name0, score1, name1, ... ] in args for
         non-strict version
         """
-        self._pipe.multi()
+        if not self._pipe.explicit_transaction: self._pipe.multi()
         StrictPipeline.zadd(self._pipe, name, *args, **kwargs)
 
     def _zrem(self, name, value):
-        self._pipe.multi()
+        if not self._pipe.explicit_transaction: self._pipe.multi()
         self._pipe.zrem(name, value)
 
     def _lpush(self, name, *values):
-        self._pipe.multi()
+        if not self._pipe.explicit_transaction: self._pipe.multi()
         self._pipe.lpush(*values)
 
     def _rpush(self, name, *values):
-        self._pipe.multi()
-        self._pipe.rpush(*values)
+        if not self._pipe.explicit_transaction: self._pipe.multi()
+        self._pipe.rpush(name, *values)
 
     def _delete(self, name):
-        self._pipe.multi()
+        if not self._pipe.explicit_transaction: self._pipe.multi()
         self._pipe.delete(name)
 
     def _srem(self, name, *values):
-        self._pipe.multi()
+        if not self._pipe.explicit_transaction: self._pipe.multi()
         self._pipe.srem(name, *values)
 
     def _hmset(self, name, mapping):
-        self._pipe.multi()
+        if not self._pipe.explicit_transaction: self._pipe.multi()
         self._pipe.hmset(name, mapping)
 
     def _expire(self, name, ttl):
-        self._pipe.multi()
+        if not self._pipe.explicit_transaction: self._pipe.multi()
         self._pipe.expire(name, ttl)
 
     def _zremrangebyscore(self, *args, **kwargs):
-        self._pipe.multi()
+        if not self._pipe.explicit_transaction: self._pipe.multi()
         self._pipe.zremrangebyscore(*args, **kwargs)
 
     def _sadd(self, name, *args, **kwargs):
-        self._pipe.multi()
-        self._pipe.sadd(*args, **kwargs)
+        if not self._pipe.explicit_transaction: self._pipe.multi()
+        self._pipe.sadd(name, *args, **kwargs)
+
+    def _persist(self, name):
+        if not self._pipe.explicit_transaction: self._pipe.multi()
+        self._pipe.persist(name)
 
     ### Read ###
     def _ttl(self, name):
@@ -371,12 +329,21 @@ class RQConnection(object):
         self._pipe.watch(name)
         return self._pipe.hgetall(name)
 
+    def _hget(self, name, key):
+        self._pipe.watch(name)
+        return self._pipe.hget(name, key)
+
     # Read / Then Write. BE WARY THIS CAN ONLY BE USED 1 TIME PER PIPE
     def _lpop(self, name):
         self._pipe.watch(name)
         out = self._pipe.lindex(name, 0)
         self._pipe.multi()
         return out
+
+    @contextmanager
+    def _pipeline(self):
+        with self._redis_conn.pipeline() as pipe:
+            yield pipe
 
 __all__ = ['RQConnection', 'transaction']
 

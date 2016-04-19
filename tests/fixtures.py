@@ -9,7 +9,6 @@ from __future__ import (absolute_import, division, print_function,
 import os
 import time
 
-from rq import Connection, get_current_job
 from rq.decorators import job
 from rq.compat import PY2
 
@@ -85,12 +84,6 @@ class UnicodeStringObject(object):
             return u'é'.encode('utf-8')
         else:
             return u'é'
-
-
-with Connection():
-    @job(queue='default')
-    def decorated_job(x, y):
-        return x + y
 
 
 def black_hole(job, *exc_info):

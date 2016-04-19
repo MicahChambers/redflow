@@ -10,8 +10,7 @@ from rq.compat import as_text, decode_redis_hash, string_types, text_type
 
 from .exceptions import NoSuchJobError, UnpickleError
 from .local import LocalStack
-from .utils import enum, import_attribute, utcformat, utcnow, utcparse
-from .connections import transaction
+from .utils import enum, import_attribute, utcformat, utcnow, utcparse, transaction
 from .keys import job_key_from_id, children_key_from_id, parents_key_from_id
 
 try:
@@ -136,12 +135,17 @@ class Job(object):
 
         # dependencies could be a single job or a list of jobs
         if depends_on:
-            if isinstance(depends_on, list):
-                self._parent_ids = [tmp.id for tmp in depends_on]
-            else:
-                self._parent_ids = ([depends_on.id]
-                                    if isinstance(depends_on, Job)
-                                    else [depends_on])
+            if not isinstance(depends_on, list):
+                depends_on = [depends_on]
+
+            self._parent_ids = []
+            for tmp in depends_on:
+                if isinstance(tmp, Job):
+                    self._parent_ids.append(tmp.id)
+                else:
+                    self._parent_ids.append(tmp)
+        else:
+            self._parent_ids = []
 
         return self
 
@@ -171,15 +175,15 @@ class Job(object):
     def is_started(self):
         return self.get_status() == JobStatus.STARTED
 
-    @transaction
     @property
+    @transaction
     def dependencies(self):
         """
         Returns a list of job's dependencies. To avoid repeated Redis fetches,
         cache job.dependencies
         """
-        if self._parent_ids is None:
-            return None
+        if not self._parent_ids:
+            return []
         if hasattr(self, '_dependencies'):
             return self._dependencies
         self._dependencies = [self._storage.get_job(dependency_id)
@@ -207,8 +211,8 @@ class Job(object):
         job's successful execution"""
         return self.children
 
-    @transaction
     @property
+    @transaction
     def children(self):
         """Returns a list of jobs whose execution depends on this
         job's successful execution"""
@@ -335,7 +339,7 @@ class Job(object):
         self.result_ttl = None
         self.ttl = None
         self._status = None
-        self._parent_ids = None
+        self._parent_ids = []
         self.meta = {}
 
     def __repr__(self):  # noqa
@@ -375,8 +379,8 @@ class Job(object):
         """The Redis key that is used to store job dependancies hash under."""
         return parents_key_from_id(self.id)
 
-    @transaction
     @property
+    @transaction
     def result(self):
         """Returns the return value of the job.
 
@@ -509,17 +513,101 @@ class Job(object):
         #self._storage._lrem(queue_key(JobStatus.FAILED), 0, self.id)
 
     # Job execution
-    def perform(self):  # noqa
+    def perform(self, default_result_ttl=90):
         """
         Invokes the job function with the job arguments.
         """
         self.ttl = -1
         _job_stack.push(self.id)
         try:
+            self._storage._redis_conn.persist(self.key)
             self._result = self.func(*self.args, **self.kwargs)
+        except Exception as exc:
+            self._job_failed(exc)
+            raise
+        else:
+            self._job_finished(default_result_ttl)
         finally:
             assert self.id == _job_stack.pop()
         return self._result
+
+    @transaction
+    def _job_finished(self, default_result_ttl):
+        finished_job_registry = self._storage.get_finished_registry(self.origin)
+        started_job_registry = self._storage.get_started_registry(self.origin)
+
+        self._move_children()
+
+        # Remove our children list
+        self._storage._delete(self.children_key)
+        started_job_registry.remove(self)
+
+        # Save results
+        result_ttl = self.get_result_ttl(default_result_ttl)
+        if result_ttl != 0:
+            self.ended_at = utcnow()
+            self.set_status(JobStatus.FINISHED)
+            self.save()
+            self.cleanup(result_ttl)
+
+            # move from started to finished registry
+            finished_job_registry.add(self, result_ttl)
+
+    @transaction
+    def _move_children(self):
+        # Now that the job is finished, check its dependents (children) to see
+        # which are ready to start
+        ready_jobs = []
+        ready_queues = []
+        ready_def_regs = []
+        non_ready_jobs = []
+
+        for child_id in self._storage._smembers(self.children_key):
+            child = self._storage.get_job(child_id)
+            if child.has_unmet_dependencies():
+                non_ready_jobs.append(child)
+            else:
+                # Save jobs, queues and registries of jobs that we are about to
+                # enqueue, since after we start writing we can't stop
+                ready_jobs.append(child)
+                ready_queues.append(self._storage.get_queue(child.origin))
+                ready_def_regs.append(self._storage.get_deferred_registery(child.origin))
+
+        # since job still isn't ready, just remove ourselves from the parents
+        # list, so it is clear that we (the current job) isn't blocking. Since
+        # these jobs are already deferred no need to modify the registry,
+        # queue or job itself
+        for non_ready_job in non_ready_jobs:
+            non_ready_job._remove_parent(self.id)
+
+        # These jobs are ready so they don't have any parents anymore -- that
+        # key can be removed. The jobs queue should have the job_id added and
+        # deferred
+        for ready_job, ready_queue, ready_def_reg in zip(ready_jobs, ready_queues,
+                                                         ready_def_regs):
+
+            ready_job._remove_parents()
+            ready_def_reg.remove(ready_job)
+
+            # enqueue the job
+            ready_job.set_status(JobStatus.QUEUED)
+            ready_job.enqueued_at = utcnow()
+            if ready_job.timeout is None:
+                ready_job.timeout = ready_queue.DEFAULT_TIMEOUT
+
+            ready_job.save()
+
+            # Todo store at_front in the job so that it skips the line here
+            ready_queue.push_job_id(ready_job.id, at_front=False)
+
+    @transaction
+    def _job_failed(self, exc_string):
+        started_job_registry = self._storage.get_started_registry(self.origin)
+        failed_queue = self._storage.get_failed_queue()
+
+        self.set_status(JobStatus.FAILED)
+        started_job_registry.remove(self)
+        failed_queue.quarantine(self, exc_info=exc_string)
 
     def get_ttl(self, default_ttl=None):
         """Returns ttl for a job that determines how long a job will be
@@ -570,6 +658,7 @@ class Job(object):
         elif ttl > 0:
             self._storage._expire(self.key, ttl)
 
+
     @transaction
     def _unfinished_parents(self):
         """
@@ -578,8 +667,6 @@ class Job(object):
 
         :return list: of job objects
         """
-        self._storage.watch(*[job_key_from_id(id) for id in self._parent_ids])
-
         unfinished_parents = []
         for parent_id in self._parent_ids:
             parent = self._storage.get_job(parent_id)

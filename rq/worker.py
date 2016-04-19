@@ -11,23 +11,19 @@ import socket
 import sys
 import time
 import traceback
-import warnings
 from datetime import timedelta
 
 from rq.compat import as_text, string_types, text_type
 
-from .connections import get_current_connection
 from .defaults import DEFAULT_RESULT_TTL, DEFAULT_WORKER_TTL
 from .exceptions import DequeueTimeout
-from .job import Job, JobStatus
+from .job import JobStatus
 from .logutils import setup_loghandlers
-from .queue import Queue
-from .registry import FinishedJobRegistry, StartedJobRegistry
-from .suspension import is_suspended
 from .timeouts import UnixSignalDeathPenalty
-from .utils import (ensure_list, enum, import_attribute, make_colorizer,
-                    utcformat, utcnow, utcparse)
+from .utils import (ensure_list, enum, make_colorizer, utcformat, utcnow,
+                    utcparse, transaction)
 from .version import VERSION
+from .keys import worker_key_from_name, WORKERS_KEY, SUSPENDED_KEY
 
 try:
     from procname import setprocname
@@ -85,8 +81,8 @@ class Worker(object):
                  storage=None):
 
         self._storage = storage
-        self.queue_class = _storage.queue_class
-        self.job_class = _storage.job_class
+        self.queue_class = storage.queue_class
+        self.job_class = storage.job_class
 
         queues = [self.queue_class(name=q, storage=storage)
                   if isinstance(q, string_types) else q
@@ -112,11 +108,7 @@ class Worker(object):
         self.failed_queue = self._storage.get_failed_queue()
         self.last_cleaned_at = None
 
-        # By default, push the "move-to-failed-queue" exception handler onto
-        # the stack
-        if exception_handlers is None:
-            #self.push_exc_handler(self.move_to_failed_queue)
-        elif isinstance(exception_handlers, list):
+        if isinstance(exception_handlers, list):
             for h in exception_handlers:
                 self.push_exc_handler(h)
         elif exception_handlers is not None:
@@ -228,8 +220,8 @@ class Worker(object):
         if timestamp is not None:
             return utcparse(as_text(timestamp))
 
-    @transaction
     @property
+    @transaction
     def death_date(self):
         """ Fetches death date from Redis. """
         timestamp = self._storage._hget(self.key, 'death')
@@ -323,7 +315,7 @@ class Worker(object):
         notified = False
 
         while (not self._stop_requested and
-                    self._storage.redis_conn.exists(SUSPENDED_KEY)
+                self._storage.redis_conn.exists(SUSPENDED_KEY)):
 
             if burst:
                 self.log.info('Suspended in burst mode, exiting\nNote: There '
@@ -512,33 +504,6 @@ class Worker(object):
         msg = 'Processing {0} from {1} since {2}'
         self.procline(msg.format(job.func_name, job.origin, time.time()))
 
-    @transaction
-    def _job_finished(self, job):
-        self.set_current_job_id(None)
-        finished_job_registry = self._storage.get_finished_registry(job.origin)
-        started_job_registry = self._storage.get_started_registry(job.origin)
-
-        result_ttl = job.get_result_ttl(self.default_result_ttl)
-        if result_ttl != 0:
-            job.ended_at = utcnow()
-            job.set_status(JobStatus.FINISHED)
-            job.save()
-            job.cleanup(result_ttl)
-
-            # move from started to finished registry
-            started_job_registry.remove(job)
-            finished_job_registry.add(job, result_ttl)
-
-    @transaction
-    def _job_failed(self, job):
-        started_job_registry = self._storage.get_started_registry(job.origin)
-        failed_queue = self._storage.get_failed_queue()
-
-        job.set_status(JobStatus.FAILED)
-        started_job_registry.remove(job)
-        self.set_current_job_id(None)
-        failed_queue.quarantine(job, exc_info=exc_string)
-
     def perform_job(self, job):
         """
         Performs the actual work of a job.  Will/should only be called
@@ -550,23 +515,19 @@ class Worker(object):
 
         try:
             with self.death_penalty_class(job.timeout or self.queue_class.DEFAULT_TIMEOUT):
-                rv = job.perform()
-            self._job_finished(job)
+                rv = job.perform(self.default_result_ttl)
 
-        except Exception:
-            try:
-                self._job_failed(job)
-            except:
-                pass
-
+        except Exception as exc:
             self.handle_exception(job, *sys.exc_info())
             return False
 
+        self.set_current_job_id(None)
         self.log.info('{0}: {1} ({2})'.format(green(job.origin), blue('Job OK'), job.id))
         if rv:
             log_result = "{0!r}".format(as_text(text_type(rv)))
             self.log.debug('Result: {0}'.format(yellow(log_result)))
 
+        result_ttl = job.get_result_ttl(self.default_result_ttl)
         if result_ttl == 0:
             self.log.info('Result discarded immediately')
         elif result_ttl > 0:
