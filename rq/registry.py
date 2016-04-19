@@ -1,5 +1,5 @@
 from .compat import as_text
-from .job import JobStatus
+from .job import Job, JobStatus
 from .queue import FailedQueue
 from .utils import current_timestamp, transaction
 from .keys import (started_registry_key_from_name,
@@ -30,14 +30,22 @@ class BaseRegistry(object):
         return self._storage._zcard(self.key)
 
     @transaction
-    def add(self, job, ttl=0):
+    def add(self, job_or_id, ttl=0):
         """Adds a job to a registry with expiry time of now + ttl."""
         score = ttl if ttl < 0 else current_timestamp() + ttl
-        return self._storage._zadd(self.key, score, job.id)
+        if isinstance(job_or_id, Job):
+            job_id = job_or_id.id
+        else:
+            job_id = job_or_id
+        return self._storage._zadd(self.key, score, job_id)
 
     @transaction
-    def remove(self, job):
-        return self._storage._zrem(self.key, job.id)
+    def remove(self, job_or_id):
+        if isinstance(job_or_id, Job):
+            job_id = job_or_id.id
+        else:
+            job_id = job_or_id
+        return self._storage._zrem(self.key, job_id)
 
     @transaction
     def get_expired_job_ids(self, timestamp=None):

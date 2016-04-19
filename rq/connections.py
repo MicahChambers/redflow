@@ -46,13 +46,13 @@ class RQConnection(object):
         self._storage = self
         self._pipe = None
 
+    @transaction
     def get_all_queues(self):
         """
         Returns an iterable of all Queues.
         """
         assert self._pipe is not None
-        self._pipe.watch(QUEUES_KEY)
-        return [queue_name_from_key(rq_key) for rq_key in
+        return [self.mkqueue(queue_name_from_key(rq_key)) for rq_key in
                 self._smembers(QUEUES_KEY) if rq_key]
 
     def mkqueue(self, name='default', async=True):
@@ -151,19 +151,21 @@ class RQConnection(object):
                queues (if they are initially empty). None waits forever.
         """
         job_id = None
+        ret_queue = None
         for ii, queue in enumerate(queues):
             if not isinstance(queue, self.queue_class):
                 queue = self.get_queue(queue)
 
-            if queue.count() > 0:
+            if queue.count > 0:
                 reg = self.get_started_registry(queue.name)
                 job_id = as_text(self._lpop(queue.key))
+                ret_queue_name = queue.name
                 reg.add(job_id)
                 break
 
-        return job_id
+        return job_id, ret_queue_name
 
-    def pop_job_id(self, queues, timeout=None):
+    def _pop_job_id(self, queues, timeout=None):
         """
         Non-blocking dequeue of the next job. Job is moved to running registry
         for the queue.
@@ -177,10 +179,11 @@ class RQConnection(object):
 
         # Since timeout is > 0, we can use blplop. Unfortunately there is no way
         # to atomically move from a queue to a set (maybe StartedJobRegistry
-        # should be a simple list). So there is a *tiny* window of time that
-        # this job will be only stored locally in memory. Generally this sort of
-        # circumstance is to be avoided but in this case there doesn't seem a
-        # way around it, other than busy waiting
+        # should be a simple list and we could use BRPOPLPUSH). So there is a
+        # *tiny* window of time that this job will be only stored locally in
+        # memory. Generally this sort of circumstance is to be avoided since it
+        # is technically possible to lose data, but in this case there doesn't
+        # seem a way around it, other than busy waiting
         keys = []
         for queue in queues:
             if isinstance(queue, self.queue_class):
@@ -194,9 +197,9 @@ class RQConnection(object):
             queue_key, job_id = result
             reg = self.get_started_registry(queue_name_from_key(queue_key))
             reg.add(job_id)
-            return job_id
+            return job_id, queue_name_from_key(queue_key)
         else:
-            return None
+            return None, None
 
     def dequeue_any(self, queues, timeout):
         """
@@ -206,8 +209,12 @@ class RQConnection(object):
         :param timeout: How long to wait for a job to appear on one of the
                queues (if they are initially empty). None waits forever.
         """
-        job_id = self.wait_for_next_job_id(queues, timeout)
-        return self.get_job(job_id)
+        job_id, queue_name = self._pop_job_id(queues, timeout)
+
+        if job_id is not None:
+            return self.get_job(job_id), self.mkqueue(queue_name)
+        else:
+            return None
 
     def _active_transaction(self):
         return self._pipe is not None
@@ -244,15 +251,16 @@ class RQConnection(object):
         non-strict version
         """
         if not self._pipe.explicit_transaction: self._pipe.multi()
-        StrictPipeline.zadd(self._pipe, name, *args, **kwargs)
+        self._pipe.zadd(name, *args, **kwargs)
 
     def _zrem(self, name, value):
         if not self._pipe.explicit_transaction: self._pipe.multi()
         self._pipe.zrem(name, value)
 
     def _lpush(self, name, *values):
-        if not self._pipe.explicit_transaction: self._pipe.multi()
-        self._pipe.lpush(*values)
+        if len(values) > 0:
+            if not self._pipe.explicit_transaction: self._pipe.multi()
+            self._pipe.lpush(name, *values)
 
     def _rpush(self, name, *values):
         if not self._pipe.explicit_transaction: self._pipe.multi()
@@ -285,6 +293,10 @@ class RQConnection(object):
     def _persist(self, name):
         if not self._pipe.explicit_transaction: self._pipe.multi()
         self._pipe.persist(name)
+
+    def _hdel(self, name, key):
+        if not self._pipe.explicit_transaction: self._pipe.multi()
+        self._pipe.hdel(name, key)
 
     ### Read ###
     def _ttl(self, name):
@@ -342,6 +354,14 @@ class RQConnection(object):
     def _hget(self, name, key):
         self._pipe.watch(name)
         return self._pipe.hget(name, key)
+
+    def _exists(self, name):
+        self._pipe.watch(name)
+        return self._pipe.exists(name)
+
+    def _hexists(self, name, key):
+        self._pipe.watch(name)
+        return self._pipe.hexists(name, key)
 
     # Read / Then Write. BE WARY THIS CAN ONLY BE USED 1 TIME PER PIPE
     def _lpop(self, name):

@@ -315,7 +315,7 @@ class Worker(object):
         notified = False
 
         while (not self._stop_requested and
-                self._storage.redis_conn.exists(SUSPENDED_KEY)):
+                self._storage._redis_conn.exists(SUSPENDED_KEY)):
 
             if burst:
                 self.log.info('Suspended in burst mode, exiting\nNote: There '
@@ -374,10 +374,6 @@ class Worker(object):
                 job, queue = result
                 self.execute_job(job)
                 self.heartbeat()
-
-                if job.get_status() == JobStatus.FINISHED:
-                    queue.enqueue_dependents(job)
-
                 did_perform_work = True
 
         finally:

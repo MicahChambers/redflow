@@ -2,22 +2,22 @@
 QUEUES_KEY = 'rq:queues'
 WORKERS_KEY = 'rq:workers'
 SUSPENDED_KEY = 'rq:suspended'
-REDIS_QUEUE_NAMESPACE_PREFIX = 'rq:queue:'
-REDIS_JOB_NAMESPACE_PREFIX = 'rq:job:'
+QUEUE_NAMESPACE_PREFIX = 'rq:queue:'
+JOB_NAMESPACE_PREFIX = 'rq:job:'
 
 def queue_key_from_name(name):
-    return REDIS_QUEUE_NAMESPACE_PREFIX + name
+    return QUEUE_NAMESPACE_PREFIX + name
 
 def queue_name_from_key(key):
-    assert key.startswith(REDIS_QUEUE_NAMESPACE_PREFIX)
-    return key[REDIS_QUEUE_NAMESPACE_PREFIX:]
+    assert key.startswith(QUEUE_NAMESPACE_PREFIX)
+    return key[len(QUEUE_NAMESPACE_PREFIX):]
 
 def job_id_from_key(key):
-    assert key.startswith(REDIS_JOB_NAMESPACE_PREFIX)
-    return key[REDIS_JOB_NAMESPACE_PREFIX:]
+    assert key.startswith(JOB_NAMESPACE_PREFIX)
+    return key[len(JOB_NAMESPACE_PREFIX):]
 
 def job_key_from_id(job_id):
-    return REDIS_JOB_NAMESPACE_PREFIX + job_id
+    return JOB_NAMESPACE_PREFIX + job_id
 
 def children_key_from_id(job_id):
     return 'rq:job:{0}:children'.format(job_id)
