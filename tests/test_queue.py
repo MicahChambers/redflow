@@ -453,14 +453,14 @@ class TestFailedQueue(RQTestCase):
         job = Job.create(func=div_by_zero, args=(1, 2, 3))
         job.origin = 'fake'
         job.save()
-        get_failed_queue().quarantine(job, Exception('Some fake error'))  # noqa
+        self.conn.get_failed_queue().quarantine(job, Exception('Some fake error'))  # noqa
 
-        self.assertEqual(Queue.all(), [get_failed_queue()])  # noqa
-        self.assertEqual(get_failed_queue().count, 1)
+        self.assertEqual(Queue.all(), [self.conn.get_failed_queue()])  # noqa
+        self.assertEqual(self.conn.get_failed_queue().count, 1)
 
-        get_failed_queue().requeue(job.id)
+        self.conn.get_failed_queue().requeue(job.id)
 
-        self.assertEqual(get_failed_queue().count, 0)
+        self.assertEqual(self.conn.get_failed_queue().count, 0)
         self.assertEqual(self.conn.mkqueue('fake').count, 1)
 
     def test_requeue_nonfailed_job_fails(self):
@@ -470,7 +470,7 @@ class TestFailedQueue(RQTestCase):
 
         # Assert that we cannot requeue a job that's not on the failed queue
         with self.assertRaises(InvalidJobOperationError):
-            get_failed_queue().requeue(job.id)
+            self.conn.get_failed_queue().requeue(job.id)
 
     def test_quarantine_preserves_timeout(self):
         """Quarantine preserves job timeout."""
@@ -478,7 +478,7 @@ class TestFailedQueue(RQTestCase):
         job.origin = 'fake'
         job.timeout = 200
         job.save()
-        get_failed_queue().quarantine(job, Exception('Some fake error'))
+        self.conn.get_failed_queue().quarantine(job, Exception('Some fake error'))
 
         self.assertEqual(job.timeout, 200)
 
@@ -488,8 +488,8 @@ class TestFailedQueue(RQTestCase):
         job.origin = 'fake'
         job.timeout = 200
         job.save()
-        get_failed_queue().quarantine(job, Exception('Some fake error'))
-        get_failed_queue().requeue(job.id)
+        self.conn.get_failed_queue().quarantine(job, Exception('Some fake error'))
+        self.conn.get_failed_queue().requeue(job.id)
 
         job = self.conn.get_job(job.id)
         self.assertEqual(job.timeout, 200)
@@ -498,8 +498,8 @@ class TestFailedQueue(RQTestCase):
         """Requeueing a job should set its status back to QUEUED."""
         job = Job.create(func=div_by_zero, args=(1, 2, 3))
         job.save()
-        get_failed_queue().quarantine(job, Exception('Some fake error'))
-        get_failed_queue().requeue(job.id)
+        self.conn.get_failed_queue().quarantine(job, Exception('Some fake error'))
+        self.conn.get_failed_queue().requeue(job.id)
 
         job = self.conn.get_job(job.id)
         self.assertEqual(job.get_status(), JobStatus.QUEUED)

@@ -61,8 +61,11 @@ class Queue(object):
         return self.count == 0
 
     @transaction
-    def get_job_ids(self, offset=0, length=-1):
-        """Returns a slice of job IDs in the queue."""
+    def _get_raw_job_ids(self, offset=0, length=-1):
+        """
+        Returns a slice of job IDs in the queue. Does no checks on validity
+        of jobs that are returned
+        """
         start = offset
         if length >= 0:
             end = offset + (length - 1)
@@ -71,15 +74,28 @@ class Queue(object):
         return self._storage._lrange(self.key, start, end)
 
     @transaction
+    def get_job_ids(self, offset=0, length=-1):
+        """Returns a slice of job IDs in the queue."""
+        return [job.id for job in self.get_jobs()]
+
+    @transaction
     def get_jobs(self, offset=0, length=-1):
         """Returns a slice of jobs in the queue."""
-        job_ids = self.get_job_ids(offset, length)
-        return compact([self._storage.get_job(job_id) for job_id in job_ids])
+        job_ids = self._get_raw_job_ids(offset, length)
+
+        jobs = []
+        for job_id in job_ids:
+            try:
+                jobs.append(self._storage.get_job(job_id) )
+            except NoSuchJobError:
+                pass
+
+        return jobs
 
     @property
     def job_ids(self):
         """Returns a list of all job IDS in the queue."""
-        return self.get_job_ids()
+        return [job.id for job in self.get_jobs()]
 
     @property
     def jobs(self):
