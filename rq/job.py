@@ -508,7 +508,6 @@ class Job(object):
         Invokes the job function with the job arguments.
         """
         self.ttl = -1
-        _job_stack.push(self.id)
         try:
             self._storage._redis_conn.persist(self.key)
             self._result = self.func(*self.args, **self.kwargs)
@@ -517,8 +516,6 @@ class Job(object):
             raise
         else:
             self._job_finished(default_result_ttl)
-        finally:
-            assert self.id == _job_stack.pop()
         return self._result
 
     @transaction
@@ -526,7 +523,7 @@ class Job(object):
         finished_job_registry = self._storage.get_finished_registry(self.origin)
         started_job_registry = self._storage.get_started_registry(self.origin)
 
-        self._move_children()
+        self._try_queue_children()
 
         # Remove our children list
         self._storage._delete(self.children_key)
@@ -542,9 +539,11 @@ class Job(object):
 
             # move from started to finished registry
             finished_job_registry.add(self, result_ttl)
+        else:
+            self.delete()
 
     @transaction
-    def _move_children(self):
+    def _try_queue_children(self):
         # Now that the job is finished, check its dependents (children) to see
         # which are ready to start
         ready_jobs = []
@@ -699,4 +698,3 @@ class Job(object):
     def __hash__(self):
         return hash(self.id)
 
-_job_stack = LocalStack()

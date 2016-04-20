@@ -165,11 +165,6 @@ class Worker(object):
         """
         return self._horse_pid
 
-    @property
-    def is_horse(self):
-        """Returns whether or not this is the worker or the work horse."""
-        return self._is_horse
-
     def procline(self, message):
         """Changes the current procname for the process.
 
@@ -382,8 +377,7 @@ class Worker(object):
                 did_perform_work = True
 
         finally:
-            if not self.is_horse:
-                self.register_death()
+            self.register_death()
         return did_perform_work
 
     def dequeue_job_and_maintain_ttl(self, timeout):
@@ -432,7 +426,8 @@ class Worker(object):
                        'Next one should arrive within {0} seconds.'.format(timeout))
 
     def execute_job(self, job):
-        """Spawns a work horse to perform the actual work and passes it a job.
+        """
+        Spawns a work horse to perform the actual work and passes it a job.
         The worker will wait for the work horse and make sure it executes
         within the given timeout bounds, or will end the work horse with
         SIGALRM.
@@ -492,7 +487,8 @@ class Worker(object):
 
     @transaction
     def prepare_job_execution(self, job):
-        """Performs misc bookkeeping like updating states prior to
+        """
+        Performs misc bookkeeping like updating states prior to
         job execution.
         """
         timeout = (job.timeout or 180) + 60
@@ -510,16 +506,14 @@ class Worker(object):
         """
         Performs the actual work of a job.  Will/should only be called
         inside the work horse's process.
-
-        ======== HERE ++++++++
         """
         self.prepare_job_execution(job)
-
         try:
             with self.death_penalty_class(job.timeout or self.queue_class.DEFAULT_TIMEOUT):
                 rv = job.perform(self.default_result_ttl)
 
         except Exception as exc:
+            self.set_current_job_id(None)
             self.handle_exception(job, *sys.exc_info())
             return False
 

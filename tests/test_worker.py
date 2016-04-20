@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
-
+import unittest
+from mock import patch
 import os
 from datetime import timedelta
 from time import sleep
@@ -20,7 +21,7 @@ from rq.job import Job, JobStatus
 from rq.registry import StartedJobRegistry
 from rq.suspension import resume, suspend
 from rq.utils import utcnow
-
+from rq.keys import WORKERS_KEY
 
 class CustomJob(Job):
     pass
@@ -29,8 +30,10 @@ class CustomJob(Job):
 class CustomQueue(Queue):
     pass
 
-
+@patch('os.fork', lambda: 0)
+@patch('os._exit', lambda ret: None)
 class TestWorker(RQTestCase):
+
     def test_create_worker(self):
         """Worker creation using various inputs."""
         foo = Queue('foo', storage=self.conn)
@@ -96,7 +99,7 @@ class TestWorker(RQTestCase):
         """Worker ttl."""
         w = Worker([], storage=self.conn)
         w.register_birth()  # ugly: our test should only call public APIs
-        [worker_key] = self.testconn.smembers(Worker.redis_workers_keys)
+        [worker_key] = self.testconn.smembers(WORKERS_KEY)
         self.assertIsNotNone(self.testconn.ttl(worker_key))
         w.register_death()
 
@@ -124,9 +127,12 @@ class TestWorker(RQTestCase):
         self.assertEqual(job.result, 'Hi there, Stranger!')
         after = utcnow()
         job.refresh()
-        self.assertTrue(before <= job.enqueued_at <= after, 'Not %s <= %s <= %s' % (before, job.enqueued_at, after))
-        self.assertTrue(before <= job.started_at <= after, 'Not %s <= %s <= %s' % (before, job.started_at, after))
-        self.assertTrue(before <= job.ended_at <= after, 'Not %s <= %s <= %s' % (before, job.ended_at, after))
+        self.assertTrue(before <= job.enqueued_at <= after,
+                        'Not %s <= %s <= %s' % (before, job.enqueued_at, after))
+        self.assertTrue(before <= job.started_at <= after,
+                        'Not %s <= %s <= %s' % (before, job.started_at, after))
+        self.assertTrue(before <= job.ended_at <= after,
+                        'Not %s <= %s <= %s' % (before, job.ended_at, after))
 
     def test_work_is_unreadable(self):
         """Unreadable jobs are put on the failed queue."""
@@ -139,7 +145,7 @@ class TestWorker(RQTestCase):
         # NOTE: We have to fake this enqueueing for this test case.
         # What we're simulating here is a call to a function that is not
         # importable from the worker process.
-        job = Job.create(func=div_by_zero, args=(3,))
+        job = Job(storage=self.conn)._new(func=div_by_zero, args=(3,))
         job.save()
         data = self.testconn.hget(job.key, 'data')
         invalid_data = data.replace(b'div_by_zero', b'nonexisting')
@@ -183,7 +189,7 @@ class TestWorker(RQTestCase):
         self.assertEqual(w.get_current_job_id(), None)
 
         # Check the job
-        job = Job.fetch(job.id)
+        job = self.conn.get_job(job.id)
         self.assertEqual(job.origin, q.name)
 
         # Should be the original enqueued_at date, not the date of enqueueing
@@ -191,6 +197,10 @@ class TestWorker(RQTestCase):
         self.assertEqual(job.enqueued_at, enqueued_at_date)
         self.assertIsNotNone(job.exc_info)  # should contain exc_info
 
+
+    @unittest.skip("I'm conflicted about whether this sort of exception "
+                   "handling is needed. I (or whoever else) can re-add the "
+                   "functionality if it is really desirable")
     def test_custom_exc_handling(self):
         """Custom exception handling."""
         def black_hole(job, *exc_info):
@@ -216,7 +226,7 @@ class TestWorker(RQTestCase):
         self.assertEqual(failed_q.count, 0)
 
         # Check the job
-        job = Job.fetch(job.id)
+        job.refresh()
         self.assertEqual(job.is_failed, True)
 
     def test_cancelled_jobs_arent_executed(self):  # noqa
@@ -277,13 +287,13 @@ class TestWorker(RQTestCase):
         job = q.enqueue(say_hello, args=('Frank',), result_ttl=10)
         w = Worker([q], storage=self.conn)
         w.work(burst=True)
-        self.assertNotEqual(self.testconn._ttl(job.key), 0)
+        self.assertNotEqual(self.testconn.ttl(job.key), 0)
 
         # Job with -1 result_ttl don't expire
         job = q.enqueue(say_hello, args=('Frank',), result_ttl=-1)
         w = Worker([q], storage=self.conn)
         w.work(burst=True)
-        self.assertEqual(self.testconn._ttl(job.key), -1)
+        self.assertEqual(self.testconn.ttl(job.key), -1)
 
         # Job with result_ttl = 0 gets deleted immediately
         job = q.enqueue(say_hello, args=('Frank',), result_ttl=0)
@@ -303,7 +313,7 @@ class TestWorker(RQTestCase):
         self.assertEqual(job.is_failed, False)
 
         w.work(burst=True)
-        job = Job.fetch(job.id)
+        job = self.conn.get_job(job.id)
         self.assertEqual(job.get_status(), JobStatus.FINISHED)
         self.assertEqual(job.is_queued, False)
         self.assertEqual(job.is_finished, True)
@@ -312,7 +322,7 @@ class TestWorker(RQTestCase):
         # Failed jobs should set status to "failed"
         job = q.enqueue(div_by_zero, args=(1,))
         w.work(burst=True)
-        job = Job.fetch(job.id)
+        job = self.conn.get_job(job.id)
         self.assertEqual(job.get_status(), JobStatus.FAILED)
         self.assertEqual(job.is_queued, False)
         self.assertEqual(job.is_finished, False)
@@ -325,13 +335,13 @@ class TestWorker(RQTestCase):
         parent_job = q.enqueue(say_hello)
         job = q.enqueue_call(say_hello, depends_on=parent_job)
         w.work(burst=True)
-        job = Job.fetch(job.id)
+        job = self.conn.get_job(job.id)
         self.assertEqual(job.get_status(), JobStatus.FINISHED)
 
         parent_job = q.enqueue(div_by_zero)
         job = q.enqueue_call(say_hello, depends_on=parent_job)
         w.work(burst=True)
-        job = Job.fetch(job.id)
+        job = self.conn.get_job(job.id)
         self.assertNotEqual(job.get_status(), JobStatus.FINISHED)
 
     def test_get_current_job(self):
