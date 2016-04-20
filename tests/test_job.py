@@ -10,7 +10,7 @@ from tests.helpers import strip_microseconds
 
 from rq.compat import PY2, as_text
 from rq.exceptions import NoSuchJobError, UnpickleError
-from rq.job import Job, get_current_job, JobStatus
+from rq.job import Job, JobStatus
 from rq.queue import Queue
 from rq.registry import DeferredJobRegistry
 from rq.utils import utcformat
@@ -291,10 +291,6 @@ class TestJob(RQTestCase):
             self.assertEqual(job.description, "tests.fixtures.say_hello(u'Lionel')")
         else:
             self.assertEqual(job.description, "tests.fixtures.say_hello('Lionel')")
-
-    def test_job_access_outside_job_fails(self):
-        """The current job is accessible only within a job context."""
-        self.assertIsNone(get_current_job())
 
     def test_job_access_within_job_function(self):
         """The current job is accessible within the job function."""
