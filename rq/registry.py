@@ -1,4 +1,5 @@
 from .compat import as_text
+from .exceptions import NoSuchJobError
 from .job import Job, JobStatus
 from .queue import FailedQueue
 from .utils import current_timestamp, transaction
@@ -16,7 +17,12 @@ class BaseRegistry(object):
 
     def __init__(self, name='default', storage=None):
         self.name = name
-        self._storage = storage
+
+        from rq.connections import RQConnection
+        if isinstance(storage, RQConnection):
+            self._storage = storage
+        elif storage is not None:
+            self._storage = RQConnection(storage)
 
     def __len__(self):
         """Returns the number of jobs in this registry"""
@@ -60,11 +66,14 @@ class BaseRegistry(object):
                 self._storage._zrangebyscore(self.key, 0, score)]
 
     @transaction
+    def _get_raw_job_ids(self, start=0, end=-1):
+        return [as_text(job_id) for job_id in
+                self._storage._zrange(self.key, start, end)]
+
     def get_job_ids(self, start=0, end=-1):
         """Returns list of all job ids."""
         self.cleanup()
-        return [as_text(job_id) for job_id in
-                self._storage._zrange(self.key, start, end)]
+        return self._get_raw_job_ids(start, end)
 
     def cleanup(self):
         raise NotImplemented("BaseRegistry has no cleanup() implemented!")
@@ -95,19 +104,18 @@ class StartedJobRegistry(BaseRegistry):
         """
         score = timestamp if timestamp is not None else current_timestamp()
         job_ids = self.get_expired_job_ids(score)
+        failed_queue = FailedQueue(storage=self._storage)
 
-        if job_ids:
-            failed_queue = FailedQueue(storage=self._storage)
-            jobs = [self._storage.get_job(job_id) for job_id in job_ids]
+        for job_id in job_ids:
+            try:
+                job = self._storage.get_job(job_id)
+            except NoSuchJobError:
+                continue
+            job.set_status(JobStatus.FAILED)
+            job.save()
+            failed_queue.push_job_id(job_id)
 
-            for job in jobs:
-                if job is None:
-                    continue
-                job.set_status(JobStatus.FAILED)
-                job.save()
-                failed_queue.push_job_id(job_id)
-
-            self._storage._zremrangebyscore(self.key, 0, score)
+        self._storage._zremrangebyscore(self.key, 0, score)
 
         return job_ids
 

@@ -378,7 +378,7 @@ class TestWorker(RQTestCase):
         worker_generic = Worker([q_generic], storage=self.conn)
         self.assertEqual(worker_custom.queue_class, CustomQueue)
         self.assertEqual(worker_generic.queue_class, Queue)
-        self.assertEqual(Worker.queue_class, Queue)
+        self.assertEqual(self.conn.queue_class, Queue)
 
     def test_custom_job_class_is_not_global(self):
         """Ensure Worker custom job class is not global."""
@@ -388,12 +388,13 @@ class TestWorker(RQTestCase):
         worker_generic = Worker([q_generic], storage=self.conn)
         self.assertEqual(worker_custom.job_class, CustomJob)
         self.assertEqual(worker_generic.job_class, Job)
-        self.assertEqual(Worker.job_class, Job)
+        self.assertEqual(self.conn.job_class, Job)
 
     def test_work_via_simpleworker(self):
         """Worker processes work, with forking disabled,
         then returns."""
-        fooq, barq = Queue('foo'), Queue('bar')
+        fooq = Queue('foo', storage=self.conn)
+        barq = Queue('bar', storage=self.conn)
         w = SimpleWorker([fooq, barq], storage=self.conn)
         self.assertEqual(w.work(burst=True), False,
                          'Did not expect any work on the queue.')
@@ -421,7 +422,7 @@ class TestWorker(RQTestCase):
 
     def test_work_unicode_friendly(self):
         """Worker processes work with unicode description, then quits."""
-        q = Queue('foo')
+        q = Queue('foo', storage=self.conn)
         w = Worker([q], storage=self.conn)
         job = q.enqueue('tests.fixtures.say_hello', name='Adam',
                         description='你好 世界!')
@@ -482,7 +483,7 @@ class TestWorker(RQTestCase):
 
     def test_worker_hash_(self):
         """Workers are hashed by their .name attribute"""
-        q = Queue('foo')
+        q = Queue('foo', storage=self.conn)
         w1 = Worker([q], name="worker1", storage=self.conn)
         w2 = Worker([q], name="worker2", storage=self.conn)
         w3 = Worker([q], name="worker1", storage=self.conn)
@@ -575,7 +576,10 @@ class TestWorkerShutdown(RQTestCase):
 
     @slow
     def test_idle_worker_warm_shutdown(self):
-        """worker with no ongoing job receiving single SIGTERM signal and shutting down"""
+        """
+        worker with no ongoing job receiving single SIGTERM signal and shutting
+        down
+        """
         w = Worker('foo', storage=self.conn)
         self.assertFalse(w._stop_requested)
         p = Process(target=kill_worker, args=(os.getpid(), False))
@@ -588,8 +592,11 @@ class TestWorkerShutdown(RQTestCase):
 
     @slow
     def test_working_worker_warm_shutdown(self):
-        """worker with an ongoing job receiving single SIGTERM signal, allowing job to finish then shutting down"""
-        fooq = Queue('foo')
+        """
+        worker with an ongoing job receiving single SIGTERM signal, allowing job
+        to finish then shutting down
+        """
+        fooq = Queue('foo', storage=self.conn)
         w = Worker(fooq, storage=self.conn)
 
         sentinel_file = '/tmp/.rq_sentinel_warm'
@@ -610,8 +617,11 @@ class TestWorkerShutdown(RQTestCase):
 
     @slow
     def test_working_worker_cold_shutdown(self):
-        """worker with an ongoing job receiving double SIGTERM signal and shutting down immediately"""
-        fooq = Queue('foo')
+        """
+        worker with an ongoing job receiving double SIGTERM signal and shutting
+        down immediately
+        """
+        fooq = Queue('foo', storage=self.conn)
         w = Worker(fooq, storage=self.conn)
         sentinel_file = '/tmp/.rq_sentinel_cold'
         fooq.enqueue(create_file_after_timeout, sentinel_file, 2)

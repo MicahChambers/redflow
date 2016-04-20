@@ -36,14 +36,13 @@ class RQConnection(object):
                 queue_class = import_attribute(queue_class)
             self.queue_class = queue_class
 
-        if redis_conn:
+        if isinstance(redis_conn, StrictRedis):
             self._redis_conn = redis_conn
-        else:
+        elif redis_conn is None and redis_kwargs:
             self._redis_conn = StrictRedis(**redis_kwargs)
-
-        if not isinstance(self._redis_conn, StrictRedis):
+        else:
             raise ValueError("redis argument to Connection must be of type "
-                             "StrictRedis")
+                             "StrictRedis, or redis_kwargs must be provided")
 
         self._storage = self
         self._pipe = None
@@ -181,7 +180,6 @@ class RQConnection(object):
         if timeout == 0:
             return self._pop_job_id_no_wait(queues)
 
-
         # Since timeout is > 0, we can use blplop. Unfortunately there is no way
         # to atomically move from a queue to a set (maybe StartedJobRegistry
         # should be a simple list and we could use BRPOPLPUSH). So there is a
@@ -217,7 +215,6 @@ class RQConnection(object):
         :param timeout: How long to wait for a job to appear on one of the
                queues (if they are initially empty). None waits forever.
         """
-
         while True:
             start_time = time.time()
             job_id, queue_name = self._pop_job_id(queues, timeout=timeout)

@@ -78,7 +78,7 @@ class Worker(object):
 
     def __init__(self, queues, name=None, default_result_ttl=None,
                  exception_handlers=None, default_worker_ttl=None,
-                 storage=None):
+                 storage=None, queue_class=None, job_class=None):
 
         from .connections import RQConnection
         if isinstance(storage, RQConnection):
@@ -86,8 +86,15 @@ class Worker(object):
         else:
             self._storage = RQConnection(storage)
 
-        self.queue_class = storage.queue_class
-        self.job_class = storage.job_class
+        if queue_class is not None:
+            self.queue_class = queue_class
+        else:
+            self.queue_class = self._storage.queue_class
+
+        if job_class is not None:
+            self.job_class = job_class
+        else:
+            self.job_class = self._storage.job_class
 
         queues = [self.queue_class(name=q, storage=storage)
                   if isinstance(q, string_types) else q
@@ -492,12 +499,14 @@ class Worker(object):
         job execution.
         """
         timeout = (job.timeout or 180) + 60
+        started_registry = self._storage.get_started_registry(job.origin)
 
         self.set_state(WorkerStatus.BUSY)
         self.set_current_job_id(job.id)
         self.heartbeat(timeout)
         job.set_status(JobStatus.STARTED)
         self._storage._hset(job.key, 'started_at', utcformat(utcnow()))
+        started_registry.add(job, timeout)
 
         msg = 'Processing {0} from {1} since {2}'
         self.procline(msg.format(job.func_name, job.origin, time.time()))

@@ -22,7 +22,7 @@ class CustomJob(Job):
 class TestQueue(RQTestCase):
     def test_create_queue(self):
         """Creating queues."""
-        conn = RQConnection()
+        conn = RQConnection(redis_conn=self.testconn)
         q = conn.mkqueue('my-queue')
         self.assertEqual(q.name, 'my-queue')
 
