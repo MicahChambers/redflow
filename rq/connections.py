@@ -181,6 +181,7 @@ class RQConnection(object):
         if timeout == 0:
             return self._pop_job_id_no_wait(queues)
 
+
         # Since timeout is > 0, we can use blplop. Unfortunately there is no way
         # to atomically move from a queue to a set (maybe StartedJobRegistry
         # should be a simple list and we could use BRPOPLPUSH). So there is a
@@ -195,6 +196,9 @@ class RQConnection(object):
             else:
                 keys.append(queue_key_from_name(queue))
 
+        # Convert None to blpop's infinite timeout (0)
+        if timeout is None:
+            timeout = 0
         result = self._redis_conn.blpop(keys, int(math.ceil(timeout)))
 
         if result:

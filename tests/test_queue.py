@@ -311,52 +311,58 @@ class TestQueue(RQTestCase):
             ((1,), {'timeout': 1, 'result_ttl': 1})
         )
 
-#    def test_all_queues(self):
-#        """All queues"""
-#        q1 = self.conn.mkqueue('first-queue')
-#        q2 = self.conn.mkqueue('second-queue')
-#        q3 = self.conn.mkqueue('third-queue')
-#
-#        # Ensure a queue is added only once a job is enqueued
-#        self.assertEqual(len(self.conn.get_all_queues()), 0)
-#        q1.enqueue(say_hello)
-#        self.assertEqual(len(self.conn.get_all_queues()), 1)
-#
-#        # Ensure this holds true for multiple queues
-#        q2.enqueue(say_hello)
-#        q3.enqueue(say_hello)
-#        names = [q.name for q in self.conn.get_all_queues()]
-#        self.assertEqual(len(self.conn.get_all_queues()), 3)
-#
-#        # Verify names
-#        self.assertTrue('first-queue' in names)
-#        self.assertTrue('second-queue' in names)
-#        self.assertTrue('third-queue' in names)
-#
-#        # Now empty two queues
-#        w = Worker([q2, q3], storage=self.conn)
-#        w.work(burst=True)
-#
-#        # self.conn.get_all_queues() should still report the empty queues
-#        self.assertEqual(len(self.conn.get_all_queues()), 3)
+    def test_all_queues(self):
+        """All queues"""
+        q1 = self.conn.mkqueue('first-queue')
+        q2 = self.conn.mkqueue('second-queue')
+        q3 = self.conn.mkqueue('third-queue')
+
+        # Ensure a queue is added only once a job is enqueued
+        self.assertEqual(len(self.conn.get_all_queues()), 0)
+        q1.enqueue(say_hello)
+        self.assertEqual(len(self.conn.get_all_queues()), 1)
+
+        # Ensure this holds true for multiple queues
+        q2.enqueue(say_hello)
+        q3.enqueue(say_hello)
+        names = [q.name for q in self.conn.get_all_queues()]
+        self.assertEqual(len(self.conn.get_all_queues()), 3)
+
+        # Verify names
+        self.assertTrue('first-queue' in names)
+        self.assertTrue('second-queue' in names)
+        self.assertTrue('third-queue' in names)
+
+        # Now empty two queues
+        w = Worker([q2, q3], storage=self.conn)
+        w.work(burst=True)
+
+        # self.conn.get_all_queues() should still report the empty queues
+        self.assertEqual(len(self.conn.get_all_queues()), 3)
 
     def test_enqueue_dependents(self):
-        """Enqueueing dependent jobs pushes all jobs in the depends set to the queue
-        and removes them from DeferredJobQueue."""
+        """
+        Enqueueing dependent jobs pushes all jobs in the depends set to the queue
+        and removes them from DeferredJobQueue.
+        """
+        parent_queue = self.conn.mkqueue('parent')
+        parent_job = parent_queue.enqueue(say_hello)
+
         q = self.conn.mkqueue()
-        parent_job = self.conn._create_job(func=say_hello)
-        parent_job.save()
         job_1 = q.enqueue(say_hello, depends_on=parent_job)
         job_2 = q.enqueue(say_hello, depends_on=parent_job)
 
+        # Jobs with unmet dependencies should be deferred, not queued
         registry = self.conn.get_deferred_registry(q.name)
         self.assertEqual(
             set(registry.get_job_ids()),
             set([job_1.id, job_2.id])
         )
-        # After dependents is enqueued, job_1 and job_2 should be in queue
         self.assertEqual(q.job_ids, [])
-        q.enqueue_dependents(parent_job)
+
+        parent_job._job_finished(0)
+
+        # After job finishes, children should be enqueued
         self.assertEqual(set(q.job_ids), set([job_2.id, job_1.id]))
         self.assertFalse(self.testconn.exists(parent_job.dependents_key))
 
@@ -366,20 +372,21 @@ class TestQueue(RQTestCase):
     def test_enqueue_dependents_on_multiple_queues(self):
         """Enqueueing dependent jobs on multiple queues pushes jobs in the queues
         and removes them from DeferredJobRegistry for each different queue."""
+        parent_queue = self.conn.mkqueue('parent')
+        parent_job = parent_queue.enqueue(say_hello)
+
         q_1 = self.conn.mkqueue("queue_1")
         q_2 = self.conn.mkqueue("queue_2")
-        parent_job = self.conn._create_job(func=say_hello)
-        parent_job.save()
         job_1 = q_1.enqueue(say_hello, depends_on=parent_job)
         job_2 = q_2.enqueue(say_hello, depends_on=parent_job)
 
         # Each queue has its own DeferredJobRegistry
-        registry_1 = DeferredJobRegistry(q_1.name, connection=self.testconn)
+        registry_1 = self.conn.get_deferred_registry(q_1.name)
         self.assertEqual(
             set(registry_1.get_job_ids()),
             set([job_1.id])
         )
-        registry_2 = DeferredJobRegistry(q_2.name, connection=self.testconn)
+        registry_2 = self.conn.get_deferred_registry(q_2.name)
         self.assertEqual(
             set(registry_2.get_job_ids()),
             set([job_2.id])
@@ -389,8 +396,9 @@ class TestQueue(RQTestCase):
         # job_2 should be in queue_2
         self.assertEqual(q_1.job_ids, [])
         self.assertEqual(q_2.job_ids, [])
-        q_1.enqueue_dependents(parent_job)
-        q_2.enqueue_dependents(parent_job)
+
+        parent_job._job_finished(0)
+
         self.assertEqual(set(q_1.job_ids), set([job_1.id]))
         self.assertEqual(set(q_2.job_ids), set([job_2.id]))
         self.assertFalse(self.testconn.exists(parent_job.dependents_key))
@@ -403,6 +411,8 @@ class TestQueue(RQTestCase):
         """Jobs are enqueued only when their dependencies are finished."""
         # Job with unfinished dependency is not immediately enqueued
         parent_job = self.conn._create_job(func=say_hello)
+        parent_job.save()
+
         q = self.conn.mkqueue()
         job = q.enqueue_call(say_hello, depends_on=parent_job)
         self.assertEqual(q.job_ids, [])
@@ -419,6 +429,7 @@ class TestQueue(RQTestCase):
     def test_enqueue_job_with_dependency_by_id(self):
         """Can specify job dependency with job object or job id."""
         parent_job = self.conn._create_job(func=say_hello)
+        parent_job.save()
 
         q = self.conn.mkqueue()
         q.enqueue_call(say_hello, depends_on=parent_job.id)
@@ -434,7 +445,9 @@ class TestQueue(RQTestCase):
     def test_enqueue_job_with_dependency_and_timeout(self):
         """Jobs remember their timeout when enqueued as a dependency."""
         # Job with unfinished dependency is not immediately enqueued
-        parent_job = self.conn._create_job(func=say_hello)
+        parent_queue = self.conn.mkqueue('parent')
+        parent_job = parent_queue.enqueue(say_hello)
+
         q = self.conn.mkqueue()
         job = q.enqueue_call(say_hello, depends_on=parent_job, timeout=123)
         self.assertEqual(q.job_ids, [])
