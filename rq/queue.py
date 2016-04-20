@@ -17,7 +17,13 @@ class Queue(object):
 
     def __init__(self, name='default', default_timeout=None, async=True,
                  job_class=None, storage=None):
-        self._storage = storage
+
+        from .connections import RQConnection
+        if isinstance(storage, RQConnection):
+            self._storage = storage
+        else:
+            self._storage = RQConnection(storage)
+
         self.name = name
         self._key = queue_key_from_name(name)
         self._default_timeout = default_timeout

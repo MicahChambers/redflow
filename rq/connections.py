@@ -228,7 +228,8 @@ class RQConnection(object):
                 except NoSuchJobError:
                     # If we find a job that doesn't exist, try again with timeout
                     # reduced
-                    timeout = max(0, timeout - (time.time() - start_time))
+                    if timeout is not None:
+                        timeout = max(0, timeout - (time.time() - start_time))
             else:
                 return None
 

@@ -306,7 +306,12 @@ class Job(object):
         self._data = UNEVALUATED
 
     def __init__(self, id=None, storage=None):
-        self._storage = storage
+        from .connections import RQConnection
+        if isinstance(storage, RQConnection):
+            self._storage = storage
+        else:
+            self._storage = RQConnection(storage)
+
         self._id = id
         self.created_at = utcnow()
         self._data = UNEVALUATED

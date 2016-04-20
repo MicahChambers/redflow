@@ -80,7 +80,12 @@ class Worker(object):
                  exception_handlers=None, default_worker_ttl=None,
                  storage=None):
 
-        self._storage = storage
+        from .connections import RQConnection
+        if isinstance(storage, RQConnection):
+            self._storage = storage
+        else:
+            self._storage = RQConnection(storage)
+
         self.queue_class = storage.queue_class
         self.job_class = storage.job_class
 
@@ -361,7 +366,7 @@ class Worker(object):
                         self.log.info('Stopping on request')
                         break
 
-                    timeout = None if burst else max(1, self.default_worker_ttl - 60)
+                    timeout = 0 if burst else max(1, self.default_worker_ttl - 60)
 
                     result = self.dequeue_job_and_maintain_ttl(timeout)
                     if result is None:
@@ -444,7 +449,6 @@ class Worker(object):
             while True:
                 try:
                     os.waitpid(child_pid, 0)
-                    self.set_state('idle')
                     break
                 except OSError as e:
                     # In case we encountered an OSError due to EINTR (which is
@@ -455,6 +459,8 @@ class Worker(object):
                     # which we don't want to catch, so we re-raise those ones.
                     if e.errno != errno.EINTR:
                         raise
+
+        self.set_state('idle')
 
     def main_work_horse(self, job):
         """

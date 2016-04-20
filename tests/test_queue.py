@@ -311,7 +311,9 @@ class TestQueue(RQTestCase):
             ((1,), {'timeout': 1, 'result_ttl': 1})
         )
 
-    def test_all_queues(self):
+    @patch('os.fork', return_value=0)
+    @patch('os._exit')
+    def test_all_queues(self, _1, _2):
         """All queues"""
         q1 = self.conn.mkqueue('first-queue')
         q2 = self.conn.mkqueue('second-queue')
