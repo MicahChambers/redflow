@@ -373,7 +373,6 @@ class TestJob(RQTestCase):
         job = queue.enqueue(fixtures.say_hello,
                             depends_on=[parent_jobs[0], parent_ids[1]])
 
-        self.assertEqual(self.testconn.smembers(job.parents_key), set(parent_ids))
         for parent in parent_jobs:
             self.assertEqual(self.testconn.smembers(parent.children_key), set([job.id]))
         self.assertEqual(registry.get_job_ids(), [job.id])
@@ -382,7 +381,6 @@ class TestJob(RQTestCase):
 
         self.assertFalse(self.testconn.exists(job.key))
         self.assertFalse(self.testconn.exists(job.children_key))
-        self.assertFalse(self.testconn.exists(job.parents_key))
 
     def test_delete(self):
         """job.delete() deletes itself & dependents mapping from Redis."""
@@ -394,7 +392,6 @@ class TestJob(RQTestCase):
         job.delete()
         self.assertFalse(self.testconn.exists(job.key))
         self.assertFalse(self.testconn.exists(job.children_key))
-        self.assertFalse(self.testconn.exists(job.parents_key))
 
         self.assertNotIn(job.id, queue.get_job_ids())
 

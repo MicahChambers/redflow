@@ -11,8 +11,8 @@ from rq.compat import as_text, decode_redis_hash, string_types, text_type
 from .exceptions import NoSuchJobError, UnpickleError
 from .local import LocalStack
 from .utils import enum, import_attribute, utcformat, utcnow, utcparse, transaction
-from .keys import (job_key_from_id, children_key_from_id, parents_key_from_id,
-                   queue_key_from_name, QUEUES_KEY)
+from .keys import (job_key_from_id, children_key_from_id, queue_key_from_name,
+                   QUEUES_KEY)
 
 try:
     import cPickle as pickle
@@ -182,16 +182,6 @@ class Job(object):
         """
         return self._parent_ids
 
-    @transaction
-    def has_unmet_dependencies(self):
-        """
-        Checks whether job has dependencies that aren't yet finished.
-
-        This may not always be up to date, parents key is updated whenever one
-        of the parents' finishes but there may be cases where this goes south
-        """
-        return bool(self._storage._scard(self.parents_key))
-
     @property
     @transaction
     def children(self):
@@ -342,14 +332,6 @@ class Job(object):
         return children_key_from_id(self.id)
 
     @property
-    def parents_key(self):
-        """
-        The Redis key that is used to store job depedency set. These are only
-        the unmet dependencies
-        """
-        return parents_key_from_id(self.id)
-
-    @property
     @transaction
     def result(self):
         """Returns the return value of the job.
@@ -476,7 +458,6 @@ class Job(object):
         self.cancel()
         self._storage._delete(self.key)
         self._storage._delete(self.children_key)
-        self._storage._delete(self.parents_key)
         # TODO remove from queue
         # TODO remove from failed queue
 
@@ -531,7 +512,7 @@ class Job(object):
 
         for child_id in self._storage._smembers(self.children_key):
             child = self._storage.get_job(child_id)
-            if child.has_unmet_dependencies():
+            if child._unfinished_parents(ignore={self.id}):
                 non_ready_jobs.append(child)
             else:
                 # Save jobs, queues and registries of jobs that we are about to
@@ -540,20 +521,12 @@ class Job(object):
                 ready_queues.append(self._storage.get_queue(child.origin))
                 ready_def_regs.append(self._storage.get_deferred_registry(child.origin))
 
-        # since job still isn't ready, just remove ourselves from the parents
-        # list, so it is clear that we (the current job) isn't blocking. Since
-        # these jobs are already deferred no need to modify the registry,
-        # queue or job itself
-        for non_ready_job in non_ready_jobs:
-            non_ready_job._remove_parent(self.id)
-
         # These jobs are ready so they don't have any parents anymore -- that
         # key can be removed. The jobs queue should have the job_id added and
         # deferred
         for ready_job, ready_queue, ready_def_reg in zip(ready_jobs, ready_queues,
                                                          ready_def_regs):
 
-            ready_job._remove_parents()
             ready_def_reg.remove(ready_job)
 
             # enqueue the job
@@ -627,7 +600,7 @@ class Job(object):
 
 
     @transaction
-    def _unfinished_parents(self):
+    def _unfinished_parents(self, ignore=[]):
         """
         Intended to be run on in-memory job (i.e. should not load or save from
         the job key itself)
@@ -636,6 +609,9 @@ class Job(object):
         """
         unfinished_parents = []
         for parent_id in self._parent_ids:
+            if parent_id in ignore:
+                continue
+
             parent = self._storage.get_job(parent_id)
             if parent.get_status() != JobStatus.FINISHED:
                 unfinished_parents.append(parent)
@@ -649,22 +625,6 @@ class Job(object):
         finishes
         """
         self._storage._sadd(self.children_key, child_id)
-
-    @transaction
-    def _remove_parents(self):
-        """
-        Adds a child job id to the list of jobs to update after this job
-        finishes
-        """
-        self._storage._delete(self.parents_key)
-
-    @transaction
-    def _remove_parent(self, parent_id=None):
-        """
-        Adds a child job id to the list of jobs to update after this job
-        finishes
-        """
-        self._storage._srem(self.parents_key, parent_id)
 
     @transaction
     def _enqueue_or_deferr(self, at_front=False):
@@ -685,9 +645,6 @@ class Job(object):
             self.set_status(JobStatus.DEFERRED)
             deferred.add(self)
 
-            self._storage._delete(self.parents_key)
-            self._storage._sadd(self.parents_key,
-                                *[parent.id for parent in parents_remaining])
             for parent in parents_remaining:
                 parent._add_child(self.id)
         else:
