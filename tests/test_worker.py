@@ -145,7 +145,7 @@ class TestWorker(RQTestCase):
         # NOTE: We have to fake this enqueueing for this test case.
         # What we're simulating here is a call to a function that is not
         # importable from the worker process.
-        job = Job(storage=self.conn)._new(func=div_by_zero, args=(3,))
+        job = self.create_job(func=div_by_zero, args=(3,))
         job.save()
         data = self.testconn.hget(job.key, 'data')
         invalid_data = data.replace(b'div_by_zero', b'nonexisting')
