@@ -98,10 +98,21 @@ class TestRegistry(RQTestCase):
         self.assertNotIn(job.id, registry.get_job_ids())
 
     def test_get_job_count(self):
-        """StartedJobRegistry returns the right number of job count."""
-        timestamp = current_timestamp() + 10
-        self.testconn.zadd(self.registry.key, timestamp, 'foo')
-        self.testconn.zadd(self.registry.key, timestamp, 'bar')
+        """
+        StartedJobRegistry returns the right number of job count. It should
+        return the number of non-expired jobs -- regardless of whether the job
+        exists or not
+        """
+        foo = self.create_job('foo')
+        bar = self.create_job('foo')
+        keep_time = current_timestamp() + 10
+        remove_time = current_timestamp() - 10
+
+        self.testconn.zadd(self.registry.key, keep_time, foo.id)
+        self.testconn.zadd(self.registry.key, remove_time, bar.id)
+        self.testconn.zadd(self.registry.key, keep_time, 'missing1')
+        self.testconn.zadd(self.registry.key, remove_time, 'missing2')
+
         self.assertEqual(self.registry.count, 2)
         self.assertEqual(len(self.registry), 2)
 

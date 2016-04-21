@@ -108,6 +108,9 @@ class StartedJobRegistry(BaseRegistry):
         Removes jobs with an expiry time earlier than timestamp, specified as
         seconds since the Unix epoch. timestamp defaults to call time if
         unspecified. Removed jobs are added to the global failed job queue.
+
+        :return int: Change in size of registery (combination of cleaned, and
+                missing jobs)
         """
         score = timestamp if timestamp is not None else current_timestamp()
         job_ids = self.get_expired_job_ids(score)
@@ -123,6 +126,7 @@ class StartedJobRegistry(BaseRegistry):
             failed_queue.push_job_id(job_id)
 
         self._storage._zremrangebyscore(self.key, 0, score)
+        return len(job_ids)
 
 class FinishedJobRegistry(BaseRegistry):
     """
