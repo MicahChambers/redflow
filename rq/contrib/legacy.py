@@ -4,14 +4,13 @@ from __future__ import (absolute_import, division, print_function,
 
 
 import logging
-from rq import get_current_connection
 from rq import Worker
 
 
 logger = logging.getLogger(__name__)
 
 
-def cleanup_ghosts(conn=None):
+def cleanup_ghosts(conn):
     """
     RQ versions < 0.3.6 suffered from a race condition where workers, when
     abruptly terminated, did not have a chance to clean up their worker
@@ -21,9 +20,8 @@ def cleanup_ghosts(conn=None):
 
     This function will clean up any of such legacy ghosted workers.
     """
-    conn = conn if conn else get_current_connection()
     for worker in Worker.all(connection=conn):
         if conn._ttl(worker.key) == -1:
             ttl = worker.default_worker_ttl
-            conn.expire(worker.key, ttl)
+            conn._expire(worker.key, ttl)
             logger.info('Marked ghosted worker {0} to expire in {1} seconds.'.format(worker.name, ttl))

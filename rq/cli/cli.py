@@ -12,7 +12,7 @@ import click
 from redis import StrictRedis
 from redis.exceptions import ConnectionError
 
-from rq import Connection, get_failed_queue, Queue
+from rq import RQConnection
 from rq.contrib.legacy import cleanup_ghosts
 from rq.exceptions import InvalidJobOperationError
 from rq.utils import import_attribute
@@ -39,10 +39,10 @@ config_option = click.option('--config', '-c',
 
 def connect(url, config=None):
     if url:
-        return StrictRedis.from_url(url)
-
-    settings = read_config_file(config) if config else {}
-    return get_redis_from_config(settings)
+        return RQConnection(StrictRedis.from_url(url))
+    else:
+        settings = read_config_file(config) if config else {}
+        return RQConnection(get_redis_from_config(settings))
 
 
 @click.group()
@@ -60,9 +60,9 @@ def empty(url, all, queues):
     conn = connect(url)
 
     if all:
-        queues = Queue.all(connection=conn)
+        queues = conn.get_all_queues()
     else:
-        queues = [Queue(queue, connection=conn) for queue in queues]
+        queues = [conn.mkqueue(queue) for queue in queues]
 
     if not queues:
         click.echo('Nothing to do')
@@ -79,7 +79,7 @@ def empty(url, all, queues):
 def requeue(url, all, job_ids):
     """Requeue failed jobs."""
     conn = connect(url)
-    failed_queue = get_failed_queue(connection=conn)
+    failed_queue = conn.get_failed_queue()
 
     if all:
         job_ids = failed_queue.job_ids
@@ -125,8 +125,8 @@ def info(url, config, path, interval, raw, only_queues, only_workers, by_queue, 
         func = show_both
 
     try:
-        with Connection(connect(url, config)):
-            refresh(interval, func, queues, raw, by_queue)
+        conn = connect(url, config)
+        refresh(interval, func, conn, queues, raw, by_queue)
     except ConnectionError as e:
         click.echo(e)
         sys.exit(1)
@@ -170,10 +170,11 @@ def worker(url, config, burst, name, worker_class, job_class, queue_class, path,
 
     setup_loghandlers_from_args(verbose, quiet)
 
-    conn = connect(url, config)
     cleanup_ghosts(conn)
     worker_class = import_attribute(worker_class)
     queue_class = import_attribute(queue_class)
+    conn = connect(url, config, worker_class=worker_class,
+                   queue_class=queue_class, job_class=job_class)
     exception_handlers = []
     for h in exception_handler:
         exception_handlers.append(import_attribute(h))
@@ -184,22 +185,19 @@ def worker(url, config, burst, name, worker_class, job_class, queue_class, path,
 
     try:
 
-        queues = [queue_class(queue, connection=conn) for queue in queues]
         w = worker_class(queues,
                          name=name,
-                         connection=conn,
+                         storage=conn,
                          default_worker_ttl=worker_ttl,
                          default_result_ttl=results_ttl,
-                         job_class=job_class,
-                         queue_class=queue_class,
                          exception_handlers=exception_handlers or None)
 
-        # Should we configure Sentry?
-        if sentry_dsn:
-            from raven import Client
-            from rq.contrib.sentry import register_sentry
-            client = Client(sentry_dsn)
-            register_sentry(client, w)
+        ## Should we configure Sentry? TODO
+        #if sentry_dsn:
+        #    from raven import Client
+        #    from rq.contrib.sentry import register_sentry
+        #    client = Client(sentry_dsn)
+        #    register_sentry(client, w)
 
         w.work(burst=burst)
     except ConnectionError as e:
@@ -217,12 +215,15 @@ def suspend(url, config, duration):
         click.echo("Duration must be an integer greater than 1")
         sys.exit(1)
 
-    connection = connect(url, config)
-    connection_suspend(connection, duration)
+    conn = connect(url, config)
+    suspend(conn, duration)
 
     if duration:
-        msg = """Suspending workers for {0} seconds.  No new jobs will be started during that time, but then will
-        automatically resume""".format(duration)
+        msg = """
+        Suspending workers for {0} seconds.  No new jobs will be
+        started during that time, but then will
+        automatically resume
+        """.format(duration)
         click.echo(msg)
     else:
         click.echo("Suspending workers.  No new jobs will be started.  But current jobs will be completed")
@@ -233,6 +234,7 @@ def suspend(url, config, duration):
 @config_option
 def resume(url, config):
     """Resumes processing of queues, that where suspended with `rq suspend`"""
-    connection = connect(url, config)
-    connection_resume(connection)
+    conn = connect(url, config)
+    resume(conn)
     click.echo("Resuming workers.")
+

@@ -1,18 +1,23 @@
+from rq.utils import transaction
+
 WORKERS_SUSPENDED = 'rq:suspended'
 
+@transaction
+def is_suspended(conn):
+    return conn._exists(WORKERS_SUSPENDED)
 
-def is_suspended(connection):
-    return connection.exists(WORKERS_SUSPENDED)
-
-
-def suspend(connection, ttl=None):
-    """ttl = time to live in seconds.  Default is no expiration
-       Note:  If you pass in 0 it will invalidate right away
+@transaction
+def suspend(conn, ttl=None):
     """
-    connection.set(WORKERS_SUSPENDED, 1)
+    :param conn:
+    :param ttl: time to live in seconds.  Default is no expiration
+           Note: If you pass in 0 it will invalidate right away
+    """
+    conn._set(WORKERS_SUSPENDED, 1)
     if ttl is not None:
-        connection.expire(WORKERS_SUSPENDED, ttl)
+        conn_.expire(WORKERS_SUSPENDED, ttl)
 
+@transaction
+def resume(conn):
+    return conn._delete(WORKERS_SUSPENDED)
 
-def resume(connection):
-    return connection.delete(WORKERS_SUSPENDED)

@@ -81,7 +81,7 @@ def state_symbol(state):
         return state
 
 
-def show_queues(queues, raw, by_queue):
+def show_queues(conn, queues, raw, by_queue):
     if queues:
         qs = list(map(Queue, queues))
     else:
@@ -116,7 +116,7 @@ def show_queues(queues, raw, by_queue):
         click.echo('%d queues, %d jobs total' % (len(qs), num_jobs))
 
 
-def show_workers(queues, raw, by_queue):
+def show_workers(conn, queues, raw, by_queue):
     if queues:
         qs = list(map(Queue, queues))
 
@@ -164,11 +164,11 @@ def show_workers(queues, raw, by_queue):
         click.echo('%d workers, %d queues' % (len(ws), len(qs)))
 
 
-def show_both(queues, raw, by_queue):
-    show_queues(queues, raw, by_queue)
+def show_both(conn, queues, raw, by_queue):
+    show_queues(conn, queues, raw, by_queue)
     if not raw:
         click.echo('')
-    show_workers(queues, raw, by_queue)
+    show_workers(conn, queues, raw, by_queue)
     if not raw:
         click.echo('')
         import datetime
@@ -197,3 +197,4 @@ def setup_loghandlers_from_args(verbose, quiet):
     else:
         level = 'INFO'
     setup_loghandlers(level)
+
