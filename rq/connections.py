@@ -67,7 +67,7 @@ class RQConnection(object):
     def get_queue(self, name, async=True):
         return self.mkqueue(name, async=async)
 
-    def get_deferred_registry(self, name):
+    def get_deferred_registry(self, name='default'):
         """
 
         Note: no database interaction takes place here
@@ -75,7 +75,7 @@ class RQConnection(object):
         from .registry import DeferredJobRegistry
         return DeferredJobRegistry(name, storage=self)
 
-    def get_started_registry(self, name):
+    def get_started_registry(self, name='default'):
         """
 
         Note: no database interaction takes place here
@@ -83,7 +83,7 @@ class RQConnection(object):
         from .registry import StartedJobRegistry
         return StartedJobRegistry(name, storage=self)
 
-    def get_finished_registry(self, name):
+    def get_finished_registry(self, name='default'):
         """
 
         Note: no database interaction takes place here
@@ -137,6 +137,19 @@ class RQConnection(object):
             return self.get_job(job_id)
         except NoSuchJobError:
             return None
+
+    def clean_registries(self, queue):
+        """Cleans StartedJobRegistry and FinishedJobRegistry of a queue."""
+        from rq.queue import Queue
+        if isinstance(queue, Queue):
+            name = queue.name
+        else:
+            name = queue
+
+        registry = self.get_finished_registry(name)
+        registry.cleanup()
+        registry = self.get_started_registry(name)
+        registry.cleanup()
 
     def _create_job(self, *args, **kwargs):
         """

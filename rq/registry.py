@@ -32,8 +32,9 @@ class BaseRegistry(object):
     @transaction
     def count(self):
         """Returns the number of jobs in this registry"""
-        self.cleanup()
-        return self._storage._zcard(self.key)
+        count = self._storage._zcard(self.key)
+        count -= self.cleanup()
+        return count
 
     @transaction
     def add(self, job_or_id, ttl=0):
@@ -71,11 +72,17 @@ class BaseRegistry(object):
                 self._storage._zrange(self.key, start, end)]
 
     def get_job_ids(self, start=0, end=-1):
-        """Returns list of all job ids."""
+        """
+        Returns list of all job ids.
+        TODO make this a transaction by doing a zrangebyscore first
+        """
         self.cleanup()
         return self._get_raw_job_ids(start, end)
 
     def cleanup(self):
+        """
+        Should return the number of removed elements
+        """
         raise NotImplemented("BaseRegistry has no cleanup() implemented!")
 
 
@@ -117,9 +124,6 @@ class StartedJobRegistry(BaseRegistry):
 
         self._storage._zremrangebyscore(self.key, 0, score)
 
-        return job_ids
-
-
 class FinishedJobRegistry(BaseRegistry):
     """
     Registry of jobs that have been completed. Jobs are added to this
@@ -132,14 +136,17 @@ class FinishedJobRegistry(BaseRegistry):
 
     @transaction
     def cleanup(self, timestamp=None):
-        """Remove expired jobs from registry.
+        """
+        Remove expired jobs from registry.
 
         Removes jobs with an expiry time earlier than timestamp, specified as
         seconds since the Unix epoch. timestamp defaults to call time if
         unspecified.
+
+        TODO also delete the jobs?
         """
         score = timestamp if timestamp is not None else current_timestamp()
-        self._storage._zremrangebyscore(self.key, 0, score)
+        return self._storage._zremrangebyscore(self.key, 0, score)
 
 
 class DeferredJobRegistry(BaseRegistry):
