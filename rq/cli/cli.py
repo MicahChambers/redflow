@@ -238,3 +238,6 @@ def resume(url, config):
     resume(conn)
     click.echo("Resuming workers.")
 
+if __name__ == '__main__':
+    main()
+

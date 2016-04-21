@@ -9,7 +9,6 @@ from functools import partial
 import click
 import redis
 from redis import StrictRedis
-from rq import Queue, Worker
 from rq.logutils import setup_loghandlers
 from rq.worker import WorkerStatus
 
@@ -85,7 +84,7 @@ def show_queues(conn, queues, raw, by_queue):
     if queues:
         qs = list(map(Queue, queues))
     else:
-        qs = Queue.all()
+        qs = conn.get_all_queues()
 
     num_jobs = 0
     termwidth, _ = click.get_terminal_size()
@@ -126,14 +125,14 @@ def show_workers(conn, queues, raw, by_queue):
             return any(map(queue_matches, worker.queues))
 
         # Filter out workers that don't match the queue filter
-        ws = [w for w in Worker.all() if any_matching_queue(w)]
+        ws = [w for w in conn.get_all_workers() if any_matching_queue(w)]
 
         def filter_queues(queue_names):
             return [qname for qname in queue_names if Queue(qname) in qs]
 
     else:
-        qs = Queue.all()
-        ws = Worker.all()
+        qs = conn.get_all_queues()
+        ws = conn.get_all_workers()
         filter_queues = (lambda x: x)
 
     if not by_queue:
