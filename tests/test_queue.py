@@ -366,7 +366,7 @@ class TestQueue(RQTestCase):
 
         # After job finishes, children should be enqueued
         self.assertEqual(set(q.job_ids), set([job_2.id, job_1.id]))
-        self.assertFalse(self.testconn.exists(parent_job.dependents_key))
+        self.assertFalse(self.testconn.exists(parent_job.children_key))
 
         # DeferredJobRegistry should also be empty
         self.assertEqual(registry.get_job_ids(), [])
@@ -403,7 +403,7 @@ class TestQueue(RQTestCase):
 
         self.assertEqual(set(q_1.job_ids), set([job_1.id]))
         self.assertEqual(set(q_2.job_ids), set([job_2.id]))
-        self.assertFalse(self.testconn.exists(parent_job.dependents_key))
+        self.assertFalse(self.testconn.exists(parent_job.children_key))
 
         # DeferredJobRegistry should also be empty
         self.assertEqual(registry_1.get_job_ids(), [])
@@ -412,7 +412,7 @@ class TestQueue(RQTestCase):
     def test_enqueue_job_with_dependency(self):
         """Jobs are enqueued only when their dependencies are finished."""
         # Job with unfinished dependency is not immediately enqueued
-        parent_job = self.conn._create_job(func=say_hello)
+        parent_job = self.create_job(func=say_hello)
         parent_job.save()
 
         q = self.conn.mkqueue()
@@ -430,7 +430,7 @@ class TestQueue(RQTestCase):
 
     def test_enqueue_job_with_dependency_by_id(self):
         """Can specify job dependency with job object or job id."""
-        parent_job = self.conn._create_job(func=say_hello)
+        parent_job = self.create_job(func=say_hello)
         parent_job.save()
 
         q = self.conn.mkqueue()
@@ -466,7 +466,7 @@ class TestQueue(RQTestCase):
 class TestFailedQueue(RQTestCase):
     def test_requeue_job(self):
         """Requeueing existing jobs."""
-        job = self.conn._create_job(func=div_by_zero, args=(1, 2, 3))
+        job = self.create_job(func=div_by_zero, args=(1, 2, 3))
         job.origin = 'fake'
         job.save()
         self.conn.get_failed_queue().quarantine(job, Exception('Some fake error'))  # noqa
@@ -490,7 +490,7 @@ class TestFailedQueue(RQTestCase):
 
     def test_quarantine_preserves_timeout(self):
         """Quarantine preserves job timeout."""
-        job = self.conn._create_job(func=div_by_zero, args=(1, 2, 3))
+        job = self.create_job(func=div_by_zero, args=(1, 2, 3))
         job.origin = 'fake'
         job.timeout = 200
         job.save()
@@ -500,7 +500,7 @@ class TestFailedQueue(RQTestCase):
 
     def test_requeueing_preserves_timeout(self):
         """Requeueing preserves job timeout."""
-        job = self.conn._create_job(func=div_by_zero, args=(1, 2, 3))
+        job = self.create_job(func=div_by_zero, args=(1, 2, 3))
         job.origin = 'fake'
         job.timeout = 200
         job.save()
@@ -512,7 +512,7 @@ class TestFailedQueue(RQTestCase):
 
     def test_requeue_sets_status_to_queued(self):
         """Requeueing a job should set its status back to QUEUED."""
-        job = self.conn._create_job(func=div_by_zero, args=(1, 2, 3))
+        job = self.create_job(func=div_by_zero, args=(1, 2, 3))
         job.origin = 'fake'
         job.save()
         self.conn.get_failed_queue().quarantine(job, Exception('Some fake error'))

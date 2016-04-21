@@ -106,7 +106,6 @@ class Job(object):
 
         assert origin is not None, 'Must provide an origin'
 
-        self._id = text_type(uuid4())
         self.origin = origin
 
         # Set the core job tuple properties
@@ -177,46 +176,29 @@ class Job(object):
         return self.get_status() == JobStatus.STARTED
 
     @property
-    @transaction
-    def dependencies(self):
+    def parent_ids(self):
         """
-        Returns a list of job's dependencies. To avoid repeated Redis fetches,
-        cache job.dependencies
+        Returns a list of job's dependencies
         """
-        if not self._parent_ids:
-            return []
-        if hasattr(self, '_dependencies'):
-            return self._dependencies
-        self._dependencies = [self._storage.get_job(dependency_id)
-                              for dependency_id in self._parent_ids]
-
-        return self._dependencies
-
-    @transaction
-    def remove_dependency(self, dependency_id):
-        """
-        Removes a dependency from job. This is usually called when
-        dependency is successfully executed.
-        """
-        self._storage._srem(self.dependencies_key, dependency_id)
+        return self._parent_ids
 
     @transaction
     def has_unmet_dependencies(self):
-        """Checks whether job has dependencies that aren't yet finished."""
-        return bool(self._storage._scard(self.parents_key))
-
-    @property
-    def dependents(self):
         """
-        Returns a list of jobs whose execution depends on this
-        job's successful execution"""
-        return self.children
+        Checks whether job has dependencies that aren't yet finished.
+
+        This may not always be up to date, parents key is updated whenever one
+        of the parents' finishes but there may be cases where this goes south
+        """
+        return bool(self._storage._scard(self.parents_key))
 
     @property
     @transaction
     def children(self):
-        """Returns a list of jobs whose execution depends on this
-        job's successful execution"""
+        """
+        Returns a list of jobs whose execution depends on this
+        job's successful execution
+        """
         children_ids = self._storage._smembers(self.children_key)
         return [self._storage.get_job(id) for id in children_ids]
 
@@ -312,7 +294,11 @@ class Job(object):
         else:
             self._storage = RQConnection(storage)
 
-        self._id = id
+        if id is not None:
+            self._id = id
+        else:
+            self._id = text_type(uuid4())
+
         self.created_at = utcnow()
         self._data = UNEVALUATED
         self._func_name = UNEVALUATED
@@ -356,18 +342,11 @@ class Job(object):
         return children_key_from_id(self.id)
 
     @property
-    def dependents_key(self):
-        """The Redis key that is used to store job dependents hash under."""
-        return self.children_key
-
-    @property
-    def dependencies_key(self):
-        """The Redis key that is used to store job dependancies hash under."""
-        return self.parents_key
-
-    @property
     def parents_key(self):
-        """The Redis key that is used to store job dependancies hash under."""
+        """
+        The Redis key that is used to store job depedency set. These are only
+        the unmet dependencies
+        """
         return parents_key_from_id(self.id)
 
     @property
@@ -484,15 +463,12 @@ class Job(object):
     @transaction
     def cancel(self):
         """
-        Cancels the given job, which will prevent the job from ever being
-        ran (or inspected).
+        Cancels the given job, which will prevent the job from ever being run.
 
-        This method merely exists as a high-level API call to cancel jobs
-        without worrying about the internals required to implement job
-        cancellation.
+        TODO: check state of job? Remove job from registries? Remove job from
+        deferred registry?
         """
-        if self.origin:
-            self._storage._lrem(queue_key_from_name(self.origin), 1, self.id)
+        self._storage._lrem(queue_key_from_name(self.origin), 1, self.id)
 
     @transaction
     def delete(self):
@@ -503,8 +479,6 @@ class Job(object):
         self._storage._delete(self.parents_key)
         # TODO remove from queue
         # TODO remove from failed queue
-        #self._storage._lrem(queue_key(self.origin), 0, self.id)
-        #self._storage._lrem(queue_key(JobStatus.FAILED), 0, self.id)
 
     # Job execution
     def perform(self, default_result_ttl=90):
@@ -711,6 +685,9 @@ class Job(object):
             self.set_status(JobStatus.DEFERRED)
             deferred.add(self)
 
+            self._storage._delete(self.parents_key)
+            self._storage._sadd(self.parents_key,
+                                *[parent.id for parent in parents_remaining])
             for parent in parents_remaining:
                 parent._add_child(self.id)
         else:

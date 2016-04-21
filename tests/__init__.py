@@ -3,8 +3,10 @@ from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
 import logging
+from uuid import uuid4
 
 from redis import StrictRedis
+from rq.job import Job
 from rq.compat import is_python_version
 from rq.connections import RQConnection
 
@@ -76,4 +78,14 @@ class RQTestCase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         logging.disable(logging.NOTSET)
+
+    def create_job(self, *args, **kwargs):
+        if 'origin' not in kwargs:
+            kwargs['origin'] = str(uuid4())
+        if 'func' not in kwargs and len(args) == 0:
+            kwargs['func'] = 'tests.fixtures.say_hello'
+
+        job = Job(storage=self.conn)
+        job._new(*args, **kwargs)
+        return job
 

@@ -2,7 +2,6 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
-from uuid import uuid4
 from datetime import datetime
 import time
 
@@ -23,16 +22,6 @@ except ImportError:
 
 
 class TestJob(RQTestCase):
-    def create_job(self, *args, **kwargs):
-        if 'origin' not in kwargs:
-            kwargs['origin'] = str(uuid4())
-        if 'func' not in kwargs and len(args) == 0:
-            kwargs['func'] = 'tests.fixtures.say_hello'
-
-        job = Job(storage=self.conn)
-        job._new(*args, **kwargs)
-        return job
-
     def test_unicode(self):
         """Unicode in job description [issue405]"""
         job = self.create_job(
@@ -87,6 +76,7 @@ class TestJob(RQTestCase):
         self.assertIsNotNone(job.id)
         self.assertIsNotNone(job.created_at)
         self.assertIsNotNone(job.description)
+        self.assertIsNotNone(job.origin)
         self.assertIsNone(job.instance)
 
         # Job data is set...
@@ -95,7 +85,6 @@ class TestJob(RQTestCase):
         self.assertEqual(job.kwargs, {'z': 2})
 
         # ...but metadata is not
-        self.assertIsNone(job.origin)
         self.assertIsNone(job.enqueued_at)
         self.assertIsNone(job.result)
 
@@ -199,7 +188,7 @@ class TestJob(RQTestCase):
         # ... and no other keys are stored
         self.assertEqual(
             sorted(self.testconn.hkeys(job.key)),
-            [b'created_at', b'data', b'description'])
+            [b'created_at', b'data', b'description', b'origin'])
 
     def test_persistence_of_parent_job(self):
         """Storing jobs with parent job, either instance or key."""
@@ -209,15 +198,13 @@ class TestJob(RQTestCase):
                               depends_on=parent_job)
         job.save()
         stored_job = self.conn.get_job(job.id)
-        self.assertEqual(stored_job._parent_ids[0], parent_job.id)
-        self.assertEqual(stored_job.parents, parent_job)
+        self.assertEqual(stored_job.parent_ids[0], parent_job.id)
 
         job = self.create_job(func=fixtures.some_calculation,
                               depends_on=parent_job.id)
         job.save()
         stored_job = self.conn.get_job(job.id)
-        self.assertEqual(stored_job._parent_ids, parent_job.id)
-        self.assertEqual(stored_job.parents, parent_job)
+        self.assertEqual(stored_job.parent_ids[0], parent_job.id)
 
     def test_store_then_fetch(self):
         """Store, then fetch."""
@@ -386,16 +373,16 @@ class TestJob(RQTestCase):
         job = queue.enqueue(fixtures.say_hello,
                             depends_on=[parent_jobs[0], parent_ids[1]])
 
-        self.assertEqual(self.testconn.smembers(child_key), set([job.id]))
+        self.assertEqual(self.testconn.smembers(job.parents_key), set(parent_ids))
         for parent in parent_jobs:
-            child_key = 'rq:job:{}:children'.format(parent.id)
-            self.assertEqual(self.testconn.smembers(job.children_key), set([job.id]))
+            self.assertEqual(self.testconn.smembers(parent.children_key), set([job.id]))
         self.assertEqual(registry.get_job_ids(), [job.id])
 
         job.delete()
 
-        import ipdb; ipdb.set_trace()
-        self.assertEqual(registry.get_job_ids(), [])
+        self.assertFalse(self.testconn.exists(job.key))
+        self.assertFalse(self.testconn.exists(job.children_key))
+        self.assertFalse(self.testconn.exists(job.parents_key))
 
     def test_delete(self):
         """job.delete() deletes itself & dependents mapping from Redis."""
