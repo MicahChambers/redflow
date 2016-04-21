@@ -12,7 +12,7 @@ from .exceptions import NoSuchJobError, UnpickleError
 from .local import LocalStack
 from .utils import enum, import_attribute, utcformat, utcnow, utcparse, transaction
 from .keys import (job_key_from_id, children_key_from_id, parents_key_from_id,
-                   queue_key_from_name)
+                   queue_key_from_name, QUEUES_KEY)
 
 try:
     import cPickle as pickle
@@ -87,9 +87,9 @@ class Job(object):
     """
 
     # Job construction
-    def _new(self, func, args=None, kwargs=None,
+    def _new(self, func, args=None, kwargs=None, origin=None,
              result_ttl=None, ttl=None, status=None, description=None,
-             depends_on=None, timeout=None, id=None, origin=None, meta=None):
+             depends_on=None, timeout=None, meta=None):
         """
         Creates a new Job instance for the given function, arguments, and
         keyword arguments.
@@ -104,10 +104,10 @@ class Job(object):
         if not isinstance(kwargs, dict):
             raise TypeError('{0!r} is not a valid kwargs dict'.format(kwargs))
 
-        self._id = text_type(uuid4())
+        assert origin is not None, 'Must provide an origin'
 
-        if origin is not None:
-            self.origin = origin
+        self._id = text_type(uuid4())
+        self.origin = origin
 
         # Set the core job tuple properties
         self._instance = None
@@ -136,7 +136,7 @@ class Job(object):
 
         # dependencies could be a single job or a list of jobs
         if depends_on:
-            if not isinstance(depends_on, list):
+            if not isinstance(depends_on, (list, tuple)):
                 depends_on = [depends_on]
 
             self._parent_ids = []
@@ -460,7 +460,7 @@ class Job(object):
             obj['result_ttl'] = self.result_ttl
         if self._status is not None:
             obj['status'] = self._status
-        if self._parent_ids is not None:
+        if self._parent_ids:
             obj['parent_ids'] = ' '.join(self._parent_ids)
         if self.meta:
             obj['meta'] = dumps(self.meta)
@@ -472,11 +472,14 @@ class Job(object):
     @transaction
     def save(self):
         """Persists the current job instance to its corresponding Redis key."""
+        # store as dict to determine whether the current job is even valid
+        data = self.to_dict()
         key = self.key
 
         # TODO also register our dependencies
-        self._storage._hmset(key, self.to_dict())
+        self._storage._hmset(key, data)
         self.cleanup(self.ttl)
+        return self
 
     @transaction
     def cancel(self):
@@ -497,6 +500,7 @@ class Job(object):
         self.cancel()
         self._storage._delete(self.key)
         self._storage._delete(self.children_key)
+        self._storage._delete(self.parents_key)
         # TODO remove from queue
         # TODO remove from failed queue
         #self._storage._lrem(queue_key(self.origin), 0, self.id)
@@ -687,6 +691,40 @@ class Job(object):
         finishes
         """
         self._storage._srem(self.parents_key, parent_id)
+
+    @transaction
+    def _enqueue_or_deferr(self, at_front=False):
+        """
+        If job depends on an unfinished job, register itself on it's parent's
+        dependents instead of enqueueing it.
+        Otherwise enqueue the job
+        """
+
+        # check if all parents are done
+        queue = self._storage.mkqueue(self.origin)
+        parents_remaining = self._unfinished_parents()
+        deferred = self._storage.get_deferred_registry(self.origin)
+
+        # Make sure this job has actually been written
+        if len(parents_remaining) > 0:
+            # Update deferred registry, parent's children set and job
+            self.set_status(JobStatus.DEFERRED)
+            deferred.add(self)
+
+            for parent in parents_remaining:
+                parent._add_child(self.id)
+        else:
+            # Make sure the queue exists
+            self._storage._sadd(QUEUES_KEY, queue.key)
+
+            # enqueue the job
+            self.set_status(JobStatus.QUEUED)
+            self.enqueued_at = utcnow()
+            if self.timeout is None:
+                self.timeout = queue.DEFAULT_TIMEOUT
+
+            self.save()
+            queue.push_job_id(self.id, at_front=at_front)
 
     def __str__(self):
         return '<Job {0}: {1}>'.format(self.id, self.description)

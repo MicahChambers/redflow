@@ -154,41 +154,6 @@ class Queue(object):
         else:
             self._storage._rpush(self.key, job_id)
 
-    @transaction
-    def _enqueue_or_deferr_job(self, job, at_front=False):
-        """
-        If job depends on an unfinished job, register itself on it's parent's
-        dependents instead of enqueueing it.
-        Otherwise enqueue the job
-        """
-
-        # check if all parents are done
-        parents_remaining = job._unfinished_parents()
-        deferred = self._storage.get_deferred_registry(self.name)
-
-        # save the job
-        job.save()
-
-        if len(parents_remaining) > 0:
-            # Update deferred registry, parent's children set and job
-            job.set_status(JobStatus.DEFERRED)
-            deferred.add(job)
-
-            for parent in parents_remaining:
-                parent._add_child(job.id)
-        else:
-            # Make sure the queue exists
-            self._storage._sadd(QUEUES_KEY, self.key)
-
-            # enqueue the job
-            job.set_status(JobStatus.QUEUED)
-            job.enqueued_at = utcnow()
-            if job.timeout is None:
-                job.timeout = self.DEFAULT_TIMEOUT
-
-            job.save()
-            self.push_job_id(job.id, at_front=at_front)
-
     def enqueue_call(self, func, args=None, kwargs=None, timeout=None,
                      result_ttl=None, ttl=None, description=None,
                      depends_on=None, at_front=False, meta=None):
@@ -207,12 +172,13 @@ class Queue(object):
         timeout = timeout or self._default_timeout
         job = self.job_class(storage=self._storage)
         job._new(func=func, args=args, kwargs=kwargs,
-                 result_ttl=result_ttl, ttl=ttl, status=JobStatus.QUEUED,
+                 result_ttl=result_ttl, ttl=ttl, status=JobStatus.DEFERRED,
                  description=description, depends_on=depends_on,
                  timeout=timeout, origin=self.name, meta=meta)
 
+        job.save()
         if self._async:
-            self._enqueue_or_deferr_job(job, at_front=at_front)
+            job._enqueue_or_deferr(at_front=at_front)
         else:
             assert len(job._unfinished_parents()) == 0
             job.perform()

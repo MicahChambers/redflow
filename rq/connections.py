@@ -132,6 +132,12 @@ class RQConnection(object):
         job.refresh()
         return job
 
+    def job_exists(self, job_id):
+        try:
+            return self.get_job(job_id)
+        except NoSuchJobError:
+            return None
+
     def _create_job(self, *args, **kwargs):
         """
         Mostly used for testing and as a helper. Creates a job object and

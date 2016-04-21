@@ -2,13 +2,14 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
+from uuid import uuid4
 from datetime import datetime
 import time
 
 from tests import fixtures, RQTestCase
 from tests.helpers import strip_microseconds
 
-from rq.compat import PY2
+from rq.compat import PY2, as_text
 from rq.exceptions import NoSuchJobError, UnpickleError
 from rq.job import Job, JobStatus
 from rq.utils import utcformat
@@ -20,8 +21,14 @@ except ImportError:
     from pickle import loads, dumps
 
 
+
 class TestJob(RQTestCase):
     def create_job(self, *args, **kwargs):
+        if 'origin' not in kwargs:
+            kwargs['origin'] = str(uuid4())
+        if 'func' not in kwargs and len(args) == 0:
+            kwargs['func'] = 'tests.fixtures.say_hello'
+
         job = Job(storage=self.conn)
         job._new(*args, **kwargs)
         return job
@@ -48,7 +55,7 @@ class TestJob(RQTestCase):
 
     def test_create_empty_job(self):
         """Creation of new empty jobs."""
-        job = self.create_job()
+        job = Job(storage=self.conn)
 
         # Jobs have a random UUID and a creation date
         self.assertIsNotNone(job.id)
@@ -121,7 +128,7 @@ class TestJob(RQTestCase):
 
     def test_job_properties_set_data_property(self):
         """Data property gets derived from the job tuple."""
-        job = self.create_job()
+        job = Job(storage=self.conn)
         job.func_name = 'foo'
         fname, instance, args, kwargs = loads(job.data)
 
@@ -132,7 +139,7 @@ class TestJob(RQTestCase):
 
     def test_data_property_sets_job_properties(self):
         """Job tuple gets derived lazily from data property."""
-        job = self.create_job()
+        job = Job(storage=self.conn)
         job.data = dumps(('foo', None, (1, 2, 3), {'bar': 'qux'}))
 
         self.assertEqual(job.func_name, 'foo')
@@ -173,7 +180,7 @@ class TestJob(RQTestCase):
 
     def test_persistence_of_empty_jobs(self):  # noqa
         """Storing empty jobs."""
-        job = self.create_job()
+        job = Job(storage=self.conn)
         with self.assertRaises(ValueError):
             job.save()
 
@@ -198,18 +205,19 @@ class TestJob(RQTestCase):
         """Storing jobs with parent job, either instance or key."""
         parent_job = self.create_job(func=fixtures.some_calculation)
         parent_job.save()
-        job = self.create_job(func=fixtures.some_calculation, depends_on=parent_job)
+        job = self.create_job(func=fixtures.some_calculation,
+                              depends_on=parent_job)
         job.save()
         stored_job = self.conn.get_job(job.id)
-        self.assertEqual(stored_job._dependency_id, parent_job.id)
-        self.assertEqual(stored_job.dependency, parent_job)
+        self.assertEqual(stored_job._parent_ids[0], parent_job.id)
+        self.assertEqual(stored_job.parents, parent_job)
 
         job = self.create_job(func=fixtures.some_calculation,
                               depends_on=parent_job.id)
         job.save()
         stored_job = self.conn.get_job(job.id)
-        self.assertEqual(stored_job._dependency_id, parent_job.id)
-        self.assertEqual(stored_job.dependency, parent_job)
+        self.assertEqual(stored_job._parent_ids, parent_job.id)
+        self.assertEqual(stored_job.parents, parent_job)
 
     def test_store_then_fetch(self):
         """Store, then fetch."""
@@ -303,19 +311,6 @@ class TestJob(RQTestCase):
         else:
             self.assertEqual(job.description, "tests.fixtures.say_hello('Lionel')")
 
-    def test_job_access_within_job_function(self):
-        """The current job is accessible within the job function."""
-        q = self.conn.mkqueue()
-
-        # access_self calls get_current_job() and asserts
-        q.enqueue(fixtures.access_self)
-        w = Worker([q])
-        w.work(burst=True)
-
-    def test_job_access_within_synchronous_job_function(self):
-        queue = self.conn.mkqueue(async=False)
-        queue.enqueue(fixtures.access_self)
-
     def test_job_async_status_finished(self):
         queue = self.conn.mkqueue(async=False)
         job = queue.enqueue(fixtures.say_hello)
@@ -360,7 +355,7 @@ class TestJob(RQTestCase):
         job.save()
         job.perform()
         self.assertEqual(job.get_ttl(), -1)
-        self.assertTrue(job.exists(job.id))
+        self.assertTrue(self.conn.job_exists(job.id))
         self.assertEqual(job.result, 'Done sleeping...')
 
     def test_cleanup(self):
@@ -383,37 +378,38 @@ class TestJob(RQTestCase):
 
     def test_register_dependency(self):
         """Ensure dependency registration works properly."""
+        registry = self.conn.get_deferred_registry('some_queue')
+        parent_jobs = [self.create_job().save(), self.create_job().save()]
+        parent_ids = [j.id for j in parent_jobs]
 
-        job = self.create_job(func=fixtures.say_hello, origin=origin)
-        job._dependency_id = 'id'
-        job.save()
+        queue = self.conn.mkqueue('some_queue')
+        job = queue.enqueue(fixtures.say_hello,
+                            depends_on=[parent_jobs[0], parent_ids[1]])
 
-        # Should not register itself as being dependent on a finished job
-        self.assertEqual(self.testconn.smembers(
-                         Job.dependents_key_for(finished_job.id)), set())
-        self.assertEqual(self.testconn.smembers(
-                         Job.dependents_key_for(job2.id)), set())
+        self.assertEqual(self.testconn.smembers(child_key), set([job.id]))
+        for parent in parent_jobs:
+            child_key = 'rq:job:{}:children'.format(parent.id)
+            self.assertEqual(self.testconn.smembers(job.children_key), set([job.id]))
+        self.assertEqual(registry.get_job_ids(), [job.id])
+
+        job.delete()
+
+        import ipdb; ipdb.set_trace()
+        self.assertEqual(registry.get_job_ids(), [])
 
     def test_delete(self):
         """job.delete() deletes itself & dependents mapping from Redis."""
         queue = self.conn.mkqueue()
         job = queue.enqueue(fixtures.say_hello)
+
         job2 = self.create_job(func=fixtures.say_hello, depends_on=job)
-        job2.register_dependency()
+        job2._enqueue_or_deferr()
         job.delete()
         self.assertFalse(self.testconn.exists(job.key))
-        self.assertFalse(self.testconn.exists(job.dependents_key))
+        self.assertFalse(self.testconn.exists(job.children_key))
+        self.assertFalse(self.testconn.exists(job.parents_key))
 
         self.assertNotIn(job.id, queue.get_job_ids())
-
-    def test_create_job_with_id(self):
-        """test creating jobs with a custom ID"""
-        queue = self.conn.mkqueue()
-        job = queue.enqueue(fixtures.say_hello, job_id="1234")
-        self.assertEqual(job.id, "1234")
-        job.perform()
-
-        self.assertRaises(TypeError, queue.enqueue, fixtures.say_hello, job_id=1234)
 
     def test_get_call_string_unicode(self):
         """test call string with unicode keyword arguments"""
