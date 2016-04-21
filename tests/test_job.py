@@ -8,11 +8,9 @@ import time
 from tests import fixtures, RQTestCase
 from tests.helpers import strip_microseconds
 
-from rq.compat import PY2, as_text
+from rq.compat import PY2
 from rq.exceptions import NoSuchJobError, UnpickleError
 from rq.job import Job, JobStatus
-from rq.queue import Queue
-from rq.registry import DeferredJobRegistry
 from rq.utils import utcformat
 from rq.worker import Worker
 
@@ -75,7 +73,8 @@ class TestJob(RQTestCase):
 
     def test_create_typical_job(self):
         """Creation of jobs for function calls."""
-        job = self.create_job(func=fixtures.some_calculation, args=(3, 4), kwargs=dict(z=2))
+        job = self.create_job(func=fixtures.some_calculation, args=(3, 4),
+                              kwargs=dict(z=2))
 
         # Jobs have a random UUID
         self.assertIsNotNone(job.id)
@@ -103,7 +102,7 @@ class TestJob(RQTestCase):
         self.assertEqual(job.instance, n)
         self.assertEqual(job.args, (4,))
 
-    def test_self.create_job_from_string_function(self):
+    def test_create_job_from_string_function(self):
         """Creation of jobs using string specifier."""
         job = self.create_job(func='tests.fixtures.say_hello', args=('World',))
 
@@ -112,7 +111,7 @@ class TestJob(RQTestCase):
         self.assertIsNone(job.instance)
         self.assertEqual(job.args, ('World',))
 
-    def test_self.create_job_from_callable_class(self):
+    def test_create_job_from_callable_class(self):
         """Creation of jobs using a callable class specifier."""
         kallable = fixtures.CallableObject()
         job = self.create_job(func=kallable)
@@ -143,7 +142,8 @@ class TestJob(RQTestCase):
 
     def test_save(self):  # noqa
         """Storing jobs."""
-        job = self.create_job(func=fixtures.some_calculation, args=(3, 4), kwargs=dict(z=2))
+        job = self.create_job(func=fixtures.some_calculation, args=(3, 4),
+                              kwargs=dict(z=2))
 
         # Saving creates a Redis hash
         self.assertEqual(self.testconn.exists(job.key), False)
@@ -179,7 +179,8 @@ class TestJob(RQTestCase):
 
     def test_persistence_of_typical_jobs(self):
         """Storing typical jobs."""
-        job = self.create_job(func=fixtures.some_calculation, args=(3, 4), kwargs=dict(z=2))
+        job = self.create_job(func=fixtures.some_calculation, args=(3, 4),
+                              kwargs=dict(z=2))
         job.save()
 
         expected_date = strip_microseconds(job.created_at)
@@ -203,7 +204,8 @@ class TestJob(RQTestCase):
         self.assertEqual(stored_job._dependency_id, parent_job.id)
         self.assertEqual(stored_job.dependency, parent_job)
 
-        job = self.create_job(func=fixtures.some_calculation, depends_on=parent_job.id)
+        job = self.create_job(func=fixtures.some_calculation,
+                              depends_on=parent_job.id)
         job.save()
         stored_job = self.conn.get_job(job.id)
         self.assertEqual(stored_job._dependency_id, parent_job.id)
@@ -211,7 +213,8 @@ class TestJob(RQTestCase):
 
     def test_store_then_fetch(self):
         """Store, then fetch."""
-        job = self.create_job(func=fixtures.some_calculation, args=(3, 4), kwargs=dict(z=2))
+        job = self.create_job(func=fixtures.some_calculation, args=(3, 4),
+                              kwargs=dict(z=2))
         job.save()
 
         job2 = self.conn.get_job(job.id)
@@ -230,7 +233,8 @@ class TestJob(RQTestCase):
     def test_fetching_unreadable_data(self):
         """Fetching succeeds on unreadable data, but lazy props fail."""
         # Set up
-        job = self.create_job(func=fixtures.some_calculation, args=(3, 4), kwargs=dict(z=2))
+        job = self.create_job(func=fixtures.some_calculation, args=(3, 4),
+                              kwargs=dict(z=2))
         job.save()
 
         # Just replace the data hkey with some random noise
@@ -271,7 +275,8 @@ class TestJob(RQTestCase):
 
     def test_result_ttl_is_persisted(self):
         """Ensure that job's result_ttl is set properly"""
-        job = self.create_job(func=fixtures.say_hello, args=('Lionel',), result_ttl=10)
+        job = self.create_job(func=fixtures.say_hello, args=('Lionel',),
+                              result_ttl=10)
         job.save()
         self.conn.get_job(job.id)
         self.assertEqual(job.result_ttl, 10)
@@ -283,7 +288,8 @@ class TestJob(RQTestCase):
 
     def test_description_is_persisted(self):
         """Ensure that job's custom description is set properly"""
-        job = self.create_job(func=fixtures.say_hello, args=('Lionel',), description='Say hello!')
+        job = self.create_job(func=fixtures.say_hello, args=('Lionel',),
+                              description='Say hello!')
         job.save()
         self.conn.get_job(job.id)
         self.assertEqual(job.description, 'Say hello!')
@@ -300,7 +306,9 @@ class TestJob(RQTestCase):
     def test_job_access_within_job_function(self):
         """The current job is accessible within the job function."""
         q = self.conn.mkqueue()
-        q.enqueue(fixtures.access_self)  # access_self calls get_current_job() and asserts
+
+        # access_self calls get_current_job() and asserts
+        q.enqueue(fixtures.access_self)
         w = Worker([q])
         w.work(burst=True)
 
@@ -398,7 +406,7 @@ class TestJob(RQTestCase):
 
         self.assertNotIn(job.id, queue.get_job_ids())
 
-    def test_self.create_job_with_id(self):
+    def test_create_job_with_id(self):
         """test creating jobs with a custom ID"""
         queue = self.conn.mkqueue()
         job = queue.enqueue(fixtures.say_hello, job_id="1234")
@@ -411,18 +419,22 @@ class TestJob(RQTestCase):
         """test call string with unicode keyword arguments"""
         queue = self.conn.mkqueue()
 
-        job = queue.enqueue(fixtures.echo, arg_with_unicode=fixtures.UnicodeStringObject())
+        job = queue.enqueue(fixtures.echo,
+                            arg_with_unicode=fixtures.UnicodeStringObject())
         self.assertIsNotNone(job.get_call_string())
         job.perform()
 
-    def test_self.create_job_with_ttl_should_have_ttl_after_enqueued(self):
-        """test creating jobs with ttl and checks if get_jobs returns it properly [issue502]"""
+    def test_create_job_with_ttl_should_have_ttl_after_enqueued(self):
+        """
+        test creating jobs with ttl and checks if get_jobs returns it
+        properly [issue502]
+        """
         queue = self.conn.mkqueue()
         queue.enqueue(fixtures.say_hello, job_id="1234", ttl=10)
         job = queue.get_jobs()[0]
         self.assertEqual(job.ttl, 10)
 
-    def test_self.create_job_with_ttl_should_expire(self):
+    def test_create_job_with_ttl_should_expire(self):
         """test if a job created with ttl expires [issue502]"""
         queue = self.conn.mkqueue()
         queue.enqueue(fixtures.say_hello, job_id="1234", ttl=1)
