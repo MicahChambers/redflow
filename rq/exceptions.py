@@ -19,3 +19,7 @@ class UnpickleError(Exception):
 
 class DequeueTimeout(Exception):
     pass
+
+class InvalidConfiguration(Exception):
+    pass
+

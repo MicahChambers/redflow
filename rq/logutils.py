@@ -38,3 +38,4 @@ def _has_effective_handler(logger):
         if not logger.parent:
             return False
         logger = logger.parent
+

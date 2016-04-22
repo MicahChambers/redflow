@@ -6,6 +6,8 @@ from contextlib import contextmanager
 import time
 import math
 
+from .local import Local
+from .config import load_config
 from .compat import string_types, as_text
 from .utils import import_attribute, compact, transaction
 from .keys import (QUEUES_KEY, queue_name_from_key, worker_key_from_name,
@@ -15,6 +17,21 @@ from .exceptions import NoSuchJobError
 class NoRedisConnectionException(Exception):
     pass
 
+
+local_connections = Local()
+
+def set_connection(new_connection=None, name='default'):
+    if new_connection is None and hasattr(local_connections, name):
+        delattr(local_connections, name)
+    else:
+        setattr(local_connections, name, new_connection)
+
+
+def get_connection(name):
+    conn = getattr(local_connections, name, None)
+    if not conn:
+        raise NoRedisConnectionException
+    return conn
 
 class RQConnection(object):
     from .queue import Queue
@@ -427,5 +444,10 @@ class RQConnection(object):
         with self._redis_conn.pipeline() as pipe:
             yield pipe
 
-__all__ = ['RQConnection', 'transaction']
+try:
+    set_connection('default', load_config())
+except:
+    pass
 
+
+__all__ = ['RQConnection', 'transaction', 'get_connection', 'set_connection']

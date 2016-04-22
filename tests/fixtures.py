@@ -82,10 +82,9 @@ class UnicodeStringObject(object):
             return u'é'
 
 
-with Connection():
-    @job(queue='default')
-    def decorated_job(x, y):
-        return x + y
+@job(queue='default')
+def decorated_job(x, y):
+    return x + y
 
 
 def black_hole(job, *exc_info):

@@ -2,11 +2,15 @@
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
 
+from mock import patch
 import mock
 from redis import StrictRedis
+from rq.connections import set_connection
 from rq.decorators import job
 from rq.job import Job
 from rq.worker import DEFAULT_RESULT_TTL
+from rq.exceptions import InvalidConfiguration
+import rq.config
 
 from tests import RQTestCase
 from tests.fixtures import decorated_job
@@ -16,6 +20,18 @@ class TestDecorator(RQTestCase):
 
     def setUp(self):
         super(TestDecorator, self).setUp()
+        set_connection(None)  # remove any default connection
+
+    @patch('rq.config.read_yaml')
+    def test_defaults_config_checked(self, mock_read):
+        mock_read.side_effect = InvalidConfiguration
+        with self.assertRaises(InvalidConfiguration):
+            rq.config.load_config()
+
+        self.assertEqual(mock_read.call_count, 3)
+        called_files = [x[0][0] for x in mock_read.call_args_list]
+        self.assertEqual(called_files,
+                         ['~/.config/rq.yaml', '~/.rq.yaml', 'rq.yaml'])
 
     def test_decorator_preserves_functionality(self):
         """Ensure that a decorated function's functionality is still preserved.
@@ -26,7 +42,10 @@ class TestDecorator(RQTestCase):
         """Ensure that decorator adds a delay attribute to function that returns
         a Job instance when called.
         """
+        set_connection(self.conn)
+
         self.assertTrue(hasattr(decorated_job, 'delay'))
+
         result = decorated_job.delay(1, 2)
         self.assertTrue(isinstance(result, Job))
         # Ensure that job returns the right result when performed
@@ -36,6 +55,8 @@ class TestDecorator(RQTestCase):
         """Ensure that passing in queue name to the decorator puts the job in
         the right queue.
         """
+        set_connection(self.conn)
+
         @job(queue='queue_name')
         def hello():
             return 'Hi'
@@ -47,6 +68,8 @@ class TestDecorator(RQTestCase):
         result_ttl on the job
         """
         # Ensure default
+        set_connection(self.conn)
+
         result = decorated_job.delay(1, 2)
         self.assertEqual(result.result_ttl, DEFAULT_RESULT_TTL)
 
@@ -59,6 +82,8 @@ class TestDecorator(RQTestCase):
     def test_decorator_accepts_ttl_as_argument(self):
         """Ensure that passing in ttl to the decorator sets the ttl on the job
         """
+        set_connection(self.conn)
+
         # Ensure default
         result = decorated_job.delay(1, 2)
         self.assertEqual(result.ttl, None)
@@ -73,6 +98,7 @@ class TestDecorator(RQTestCase):
         """Ensure that passing in depends_on to the decorator sets the
         correct dependency on the job
         """
+        set_connection(self.conn)
 
         @job(queue='queue_name')
         def foo():
@@ -85,28 +111,30 @@ class TestDecorator(RQTestCase):
         foo_job = foo.delay()
         bar_job = bar.delay(depends_on=foo_job)
 
-        self.assertIsNone(foo_job._dependency_ids)
+        self.assertFalse(foo_job._parent_ids)
+        self.assertEqual(bar_job._parent_ids, [foo_job.id])
 
-        self.assertEqual(bar_job.dependencies, [foo_job])
-
-        self.assertEqual(bar_job._dependency_ids, [foo_job.id])
-
-    @mock.patch('rq.queue.resolve_connection')
-    def test_decorator_connection_laziness(self, resolve_connection):
+    @patch('rq.decorators.get_connection')
+    def test_decorator_connection_laziness(self, mock_get_connection):
         """Ensure that job decorator resolve connection in `lazy` way """
 
-        resolve_connection.return_value = StrictRedis()
+        mock_get_connection.return_value = StrictRedis()
 
         @job(queue='queue_name')
         def foo():
             return 'do something'
 
-        self.assertEqual(resolve_connection.call_count, 0)
+        self.assertEqual(mock_get_connection.call_count, 0)
 
         foo()
 
-        self.assertEqual(resolve_connection.call_count, 0)
+        self.assertEqual(mock_get_connection.call_count, 0)
 
         foo.delay()
 
-        self.assertEqual(resolve_connection.call_count, 1)
+        self.assertEqual(mock_get_connection.call_count, 1)
+
+    def test_changing_global_connection(self):
+        """ Resetting the global connection should affect all future delays """
+        pass # todo
+
