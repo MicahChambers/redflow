@@ -67,6 +67,24 @@ class RQConnection(object):
     def get_queue(self, name, async=True):
         return self.mkqueue(name, async=async)
 
+    def mkworker(self, queues, name=None, default_result_ttl=None,
+                 exception_handlers=None, default_worker_ttl=None,
+                 queue_class=None, job_class=None):
+
+        from rq.worker import Worker
+
+        if job_class is None:
+            job_class = self.job_class
+
+        if queue_class is None:
+            queue_class = self.queue_class
+
+        return Worker(queues, name=name, default_result_ttl=default_result_ttl,
+                      exception_handlers=exception_handlers,
+                      default_worker_ttl=default_worker_ttl,
+                      queue_class=queue_class, job_class=job_class,
+                      storage=self)
+
     def get_deferred_registry(self, name='default'):
         """
 
@@ -108,13 +126,13 @@ class RQConnection(object):
             self._srem(WORKERS_KEY, worker_key)
             return None
 
-        worker = Worker(name, storage=self)
-        queues = as_text(self._hget(worker.key, 'queues'))
+        worker_dict = self._hgetall(worker_key)
+        queues = as_text(worker_dict['queues']).split(',')
+
+        worker = Worker(queues, name=name, storage=self)
         worker._state = as_text(self._hget(worker.key, 'state') or '?')
         worker._job_id = self._hget(worker.key, 'current_job') or None
-        if queues:
-            worker.queues = [self.mkqueue(queue, storage=self)
-                             for queue in queues.split(',')]
+
         return worker
 
     @transaction
