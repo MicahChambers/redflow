@@ -5,24 +5,39 @@ from __future__ import (absolute_import, division, print_function,
 import importlib
 import time
 from functools import partial
+import yaml
 
 import click
 import redis
 from redis import StrictRedis
 from rq.logutils import setup_loghandlers
 from rq.worker import WorkerStatus
+from rq.exceptions import InvalidConfiguration
 
 red = partial(click.style, fg='red')
 green = partial(click.style, fg='green')
 yellow = partial(click.style, fg='yellow')
 
 
-def read_config_file(module):
-    """Reads all UPPERCASE variables defined in the given module file."""
-    settings = importlib.import_module(module)
-    return dict([(k, v)
-                 for k, v in settings.__dict__.items()
-                 if k.upper() == k])
+DEFAULT_CONFIGS = ('~/.config/rq.yaml', '~/.rq.yaml', 'rq.yaml')
+
+
+def read_default_config_files():
+    for ff in path:
+        try:
+            return read_config_file(ff)
+        except Exception:
+            pass
+    return None
+
+
+def read_config_file(path):
+    try:
+        with open(path, 'r') as f:
+            config = yaml.load(f.read())
+    except Exception:
+        raise InvalidConfiguration('{} was not a valid yaml file!'.format(path))
+    return config
 
 
 def get_redis_from_config(settings):

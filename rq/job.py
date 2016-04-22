@@ -54,33 +54,6 @@ def unpickle(pickled_string):
     return obj
 
 
-#def cancel_job(job_id, connection=None):
-#    """Cancels the job with the given job ID, preventing execution.  Discards
-#    any job info (i.e. it can't be requeued later).
-#    """
-#    Job(job_id, connection=connection).cancel()
-#
-#
-#def requeue_job(job_id, connection=None):
-#    """Requeues the job with the given job ID.  If no such job exists, just
-#    remove the job ID from the failed queue, otherwise the job ID should refer
-#    to a failed job (i.e. it should be on the failed queue).
-#    """
-#    from .queue import get_failed_queue
-#    fq = get_failed_queue(connection=connection)
-#    fq.requeue(job_id)
-#
-#
-#def get_current_job(connection=None):
-#    """Returns the Job instance that is currently being executed.  If this
-#    function is invoked from outside a job context, None is returned.
-#    """
-#    job_id = _job_stack.top
-#    if job_id is None:
-#        return None
-#    return self._storage.get_job(job_id)
-
-
 class Job(object):
     """
     A Job is just a convenient datastructure to pass around job (meta) data.
@@ -471,7 +444,6 @@ class Job(object):
             self._storage._redis_conn.persist(self.key)
             self._result = self.func(*self.args, **self.kwargs)
         except Exception as exc:
-            self._job_failed(exc)
             raise
         else:
             self._job_finished(default_result_ttl)
@@ -539,15 +511,6 @@ class Job(object):
 
             # Todo store at_front in the job so that it skips the line here
             ready_queue.push_job_id(ready_job.id, at_front=False)
-
-    @transaction
-    def _job_failed(self, exc_string):
-        started_job_registry = self._storage.get_started_registry(self.origin)
-        failed_queue = self._storage.get_failed_queue()
-
-        self.set_status(JobStatus.FAILED)
-        started_job_registry.remove(self)
-        failed_queue.quarantine(self, exc_info=exc_string)
 
     def get_ttl(self, default_ttl=None):
         """Returns ttl for a job that determines how long a job will be

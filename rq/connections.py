@@ -11,7 +11,7 @@ from .config import load_config
 from .compat import string_types, as_text
 from .utils import import_attribute, compact, transaction
 from .keys import (QUEUES_KEY, queue_name_from_key, worker_key_from_name,
-                   WORKERS_KEY, queue_key_from_name)
+                   WORKERS_KEY, queue_key_from_name, SUSPENDED_KEY)
 from .exceptions import NoSuchJobError
 
 class NoRedisConnectionException(Exception):
@@ -33,15 +33,23 @@ def get_connection(name):
         raise NoRedisConnectionException
     return conn
 
+
 class RQConnection(object):
+    from .worker import Worker
     from .queue import Queue
     from .job import Job
 
+    worker_class = Worker
     queue_class = Queue
     job_class = Job
 
-    def __init__(self, redis_conn=None, redis_kwargs={}, job_class=None,
-                 queue_class=None):
+    def __init__(self, redis_conn=None, redis_kwargs={}, worker_class=None,
+                 job_class=None, queue_class=None):
+
+        if worker_class is not None:
+            if isinstance(worker_class, string_types):
+                worker_class = import_attribute(worker_class)
+            self.worker_class = worker_class
 
         if job_class is not None:
             if isinstance(job_class, string_types):
@@ -88,19 +96,18 @@ class RQConnection(object):
                  exception_handlers=None, default_worker_ttl=None,
                  queue_class=None, job_class=None):
 
-        from rq.worker import Worker
-
         if job_class is None:
             job_class = self.job_class
 
         if queue_class is None:
             queue_class = self.queue_class
 
-        return Worker(queues, name=name, default_result_ttl=default_result_ttl,
-                      exception_handlers=exception_handlers,
-                      default_worker_ttl=default_worker_ttl,
-                      queue_class=queue_class, job_class=job_class,
-                      storage=self)
+        return self.worker_class(queues, name=name,
+                                 default_result_ttl=default_result_ttl,
+                                 exception_handlers=exception_handlers,
+                                 default_worker_ttl=default_worker_ttl,
+                                 queue_class=queue_class, job_class=job_class,
+                                 storage=self)
 
     def get_deferred_registry(self, name='default'):
         """
@@ -136,8 +143,6 @@ class RQConnection(object):
         """
         Returns a Worker instance
         """
-        from .worker import Worker
-
         worker_key = worker_key_from_name(name)
         if not self._exists(worker_key):
             self._srem(WORKERS_KEY, worker_key)
@@ -146,7 +151,7 @@ class RQConnection(object):
         worker_dict = self._hgetall(worker_key)
         queues = as_text(worker_dict['queues']).split(',')
 
-        worker = Worker(queues, name=name, storage=self)
+        worker = self.worker_class(queues, name=name, storage=self)
         worker._state = as_text(self._hget(worker.key, 'state') or '?')
         worker._job_id = self._hget(worker.key, 'current_job') or None
 
@@ -185,6 +190,25 @@ class RQConnection(object):
         registry.cleanup()
         registry = self.get_started_registry(name)
         registry.cleanup()
+
+    @transaction
+    def is_suspended(self):
+        return self._exists(SUSPENDED_KEY)
+
+    @transaction
+    def suspend(self, ttl=None):
+        """
+        :param conn:
+        :param ttl: time to live in seconds.  Default is no expiration
+               Note: If you pass in 0 it will invalidate right away
+        """
+        self._set(SUSPENDED_KEY, 1)
+        if ttl is not None:
+            self._expire(SUSPENDED_KEY, ttl)
+
+    @transaction
+    def resume(self):
+        return self._storage._delete(SUSPENDED_KEY)
 
     def _create_job(self, *args, **kwargs):
         """
@@ -298,6 +322,13 @@ class RQConnection(object):
         """
         if not self._pipe.explicit_transaction: self._pipe.multi()
         self._pipe.setex(name=name, time=time, value=value)
+
+    def _set(self, name, value, ex=None, px=None, nx=False, xx=False):
+        """
+        Set key
+        """
+        if not self._pipe.explicit_transaction: self._pipe.multi()
+        self._pipe.set(name, value, ex, px, nx, xx)
 
     def _lrem(self, name, count, value):
         """
@@ -445,7 +476,7 @@ class RQConnection(object):
             yield pipe
 
 try:
-    set_connection('default', load_config())
+    set_connection('default', read_default_config_files())
 except:
     pass
 

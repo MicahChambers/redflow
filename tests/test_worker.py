@@ -19,7 +19,6 @@ from rq import Queue, SimpleWorker, Worker
 from rq.compat import as_text, PY2
 from rq.job import Job, JobStatus
 from rq.registry import StartedJobRegistry
-from rq.suspension import resume, suspend
 from rq.utils import utcnow
 from rq.keys import WORKERS_KEY
 
@@ -448,7 +447,7 @@ class TestWorker(RQTestCase):
 
         w = Worker([q], storage=self.conn)
 
-        suspend(self.testconn)
+        self.conn.suspend()
 
         w.work(burst=True)
         assert q.count == 1
@@ -456,7 +455,7 @@ class TestWorker(RQTestCase):
         # Should not have created evidence of execution
         self.assertEqual(os.path.exists(SENTINEL_FILE), False)
 
-        resume(self.testconn)
+        self.conn.resume()
         w.work(burst=True)
         assert q.count == 0
         self.assertEqual(os.path.exists(SENTINEL_FILE), True)
@@ -469,7 +468,7 @@ class TestWorker(RQTestCase):
         w = Worker([q], storage=self.conn)
 
         # This suspends workers for working for 2 second
-        suspend(self.testconn, 2)
+        self.conn.suspend(2)
 
         # So when this burst of work happens the queue should remain at 5
         w.work(burst=True)
