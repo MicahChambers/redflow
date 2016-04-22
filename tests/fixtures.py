@@ -82,6 +82,12 @@ class UnicodeStringObject(object):
             return u'é'
 
 
+with Connection():
+    @job(queue='default')
+    def decorated_job(x, y):
+        return x + y
+
+
 def black_hole(job, *exc_info):
     # Don't fall through to default behaviour (moving to failed queue)
     return False
