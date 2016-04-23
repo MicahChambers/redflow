@@ -1,10 +1,3 @@
-## Implementation / Refactor
-Replace old patched redis function with a new Storage object.
-
-- Storage object *requires* everything to be a transaction
-- Storage object handles popping correctly (read then remove)
-
-#####
 RQ (_Redis Queue_) is a simple Python library for queueing jobs and processing
 them in the background with workers.  It is backed by Redis and it is designed
 to have a low barrier to entry.  It should be integrated in your web stack
