@@ -188,12 +188,11 @@ def worker(url, config, burst, name, worker_class, job_class, queue_class, path,
                          default_result_ttl=results_ttl,
                          exception_handlers=exception_handlers or None)
 
-        ## Should we configure Sentry? TODO
-        #if sentry_dsn:
-        #    from raven import Client
-        #    from rq.contrib.sentry import register_sentry
-        #    client = Client(sentry_dsn)
-        #    register_sentry(client, w)
+        if sentry_dsn:
+            from raven import Client
+            from rq.contrib.sentry import register_sentry
+            client = Client(sentry_dsn)
+            register_sentry(client, w)
 
         w.work(burst=burst)
     except ConnectionError as e:

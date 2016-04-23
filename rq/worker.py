@@ -120,14 +120,13 @@ class Worker(object):
         self.failed_queue = self._storage.get_failed_queue()
         self.last_cleaned_at = None
 
-        print("Creating worker")
         if isinstance(exception_handlers, (list, tuple)):
             for h in exception_handlers:
                 self.push_exc_handler(h)
         elif exception_handlers is not None:
             self.push_exc_handler(exception_handlers)
         else:
-            self.push_exc_handler(self._default_exception_handler)
+            self.push_exc_handler(self.default_exception_handler)
 
     def validate_queues(self):
         """Sanity check for the given queues."""
@@ -546,7 +545,7 @@ class Worker(object):
         return True
 
     @transaction
-    def _default_exception_handler(self, job, *exc_info):
+    def default_exception_handler(self, job, *exc_info):
         started_job_registry = self._storage.get_started_registry(job.origin)
         failed_queue = self._storage.get_failed_queue()
 
