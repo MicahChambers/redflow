@@ -424,14 +424,56 @@ class TestJob(RQTestCase):
         properly [issue502]
         """
         queue = self.conn.mkqueue()
-        queue.enqueue(fixtures.say_hello, job_id="1234", ttl=10)
+        queue.enqueue(fixtures.say_hello, name="1234", ttl=10)
         job = queue.get_jobs()[0]
         self.assertEqual(job.ttl, 10)
 
     def test_create_job_with_ttl_should_expire(self):
         """test if a job created with ttl expires [issue502]"""
         queue = self.conn.mkqueue()
-        queue.enqueue(fixtures.say_hello, job_id="1234", ttl=1)
+        queue.enqueue(fixtures.say_hello, name="1234", ttl=1)
         time.sleep(1)
         self.assertEqual(0, len(queue.get_jobs()))
+
+    def test_future_result_adds_dependency(self):
+        """Enqueing jobs with _FutureResult arguments should add to the
+        depends_on field"""
+        queue = self.conn.mkqueue()
+        step_1 = queue.enqueue(fixtures.fibonacci_step, two_back=0, one_back=1)
+        step_2 = queue.enqueue(fixtures.fibonacci_step, two_back=1,
+                               one_back=step_1.future_result)
+
+        self.assertEqual(
+            decode_redis_set(self.testconn.smembers(step_1.children_key)),
+            set([step_2.id])
+        )
+        self.assertEqual(step_2.parent_ids, [step_1.id])
+
+    def test_future_result_adds_dependency_from_list(self):
+        """Enqueing jobs with _FutureResult in a container argument should still
+        add to the depends_on field"""
+        queue = self.conn.mkqueue()
+        step_1 = queue.enqueue(fixtures.n_back_sum, [])
+        step_2 = queue.enqueue(fixtures.n_back_sum, [step_1.future_result])
+        step_3 = queue.enqueue(fixtures.n_back_sum, [step_1.future_result,
+                                                     step_2.future_result])
+
+        self.assertEqual(
+            decode_redis_set(self.testconn.smembers(step_1.children_key)),
+            set([step_2.id, step_3.id])
+        )
+        self.assertEqual(step_2.parent_ids, [step_1.id])
+        self.assertEqual(step_3.parent_ids, [step_1.id, step_2.id])
+
+    def test_future_result_resolves_when_performed(self):
+        queue = self.conn.mkqueue()
+        step_1 = queue.enqueue(fixtures.fibonacci_step, two_back=0, one_back=1)
+        step_2 = queue.enqueue(fixtures.fibonacci_step, two_back=1,
+                               one_back=step_1.future_result)
+
+        result_1 = step_1.perform()
+        result_2 = step_2.perform()
+
+        self.assertEqual(result_1, 1)
+        self.assertEqual(result_2, 2)
 

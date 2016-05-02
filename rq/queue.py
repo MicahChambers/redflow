@@ -297,3 +297,4 @@ class FailedQueue(Queue):
         job.exc_info = None
         queue = self.connection.mkqueue(job.origin)
         queue.push_job_id(job.id)
+

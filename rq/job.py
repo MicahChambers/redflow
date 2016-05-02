@@ -107,9 +107,17 @@ class Job(object):
         job._status = status
         job.meta = meta or {}
 
+        # track dependency of any future results passed in
+        extra_depends = _find_future_results(list(args) + list(kwargs.values()))
+        if extra_depends:
+            if depends_on:
+                depends_on = set(depends_on) + set(extra_depends)
+            else:
+                depends_on = set(extra_depends)
+
         # dependencies could be a single job or a list of jobs
         if depends_on:
-            if not isinstance(depends_on, (list, tuple)):
+            if not isinstance(depends_on, (list, tuple, set)):
                 depends_on = [depends_on]
 
             job._parent_ids = []
@@ -671,5 +679,39 @@ class Job(object):
         Used by transaction to create pipes
         """
         return self.connection
+
+    @property
+    def future_result(self):
+        return _FutureResult(self.id)
+
+
+class _FutureResult(object):
+    """
+    Future result is a proxy object for the result of another job. When the job
+    referencing a future result is created this job will automatically have
+    <job_id> added to its list of parent jobs. When the job is preparing for
+    execution, it any _FutureResults' in the arguments list will be converted to
+    the actual results.
+
+    TODO: Modify parents to be persistent until all their children are
+    completed.
+
+    """
+    def __init__(self, job_id):
+        self.job_id = job_id
+
+
+def _find_future_results(in_container):
+    out = []
+    if isinstance(in_container, dict):
+        for value in in_container.values():
+            out.extend(_find_future_results(value))
+    elif hasattr(in_container, '__iter__'):
+        for value in in_container:
+            out.extend(_find_future_results(value))
+    elif isinstance(in_container, _FutureResult):
+        out.append(in_container.job_id)
+    return out
+
 
 _job_stack = LocalStack()
