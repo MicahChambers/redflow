@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
+import collections
 from functools import partial
 import inspect
 import sys
@@ -12,8 +13,7 @@ from rq.compat import as_text, decode_redis_hash, string_types, text_type
 from .exceptions import NoSuchJobError, UnpickleError
 from .local import LocalStack
 from .utils import enum, import_attribute, utcformat, utcnow, utcparse, transaction
-from .keys import (job_key_from_id, children_key_from_id, queue_key_from_name,
-                   QUEUES_KEY)
+from .keys import (job_key_from_id, children_key_from_id, QUEUES_KEY)
 
 try:
     import cPickle as pickle
@@ -38,6 +38,65 @@ JobStatus = enum(
 # Sentinel value to mark that some of our lazily evaluated properties have not
 # yet been evaluated.
 UNEVALUATED = object()
+
+
+def inplace_replace_futures(conn, invalue, raise_on_missing=False):
+    if isinstance(invalue, collections.MutableMapping):
+        # Handle Mapping
+        replace_keys = set()
+        for key in invalue:
+            if isinstance(invalue[key], _FutureResult):
+                replace_keys.add(key)
+            else:
+                inplace_replace_futures(conn, invalue[key], raise_on_missing)
+
+        # Replace the keys that reference _FutureResult
+        for key in replace_keys:
+            try:
+                invalue[key] = conn.get_job(invalue[key].job_id).result
+            except NoSuchJobError:
+                if raise_on_missing:
+                    raise
+
+    elif isinstance(invalue, collections.MutableSet):
+        # Handle Set
+        replace_values = set()
+        for value in invalue:
+            if isinstance(value, _FutureResult):
+                replace_values.add(value)
+            else:
+                inplace_replace_futures(conn, value, raise_on_missing)
+
+        # Replace the values that were _FutureResult
+        for value in replace_values:
+            try:
+                invalue.add(conn.get_job(invalue[key].job_id).result)
+                invalue.remove(value)
+            except NoSuchJobError:
+                if raise_on_missing:
+                    raise
+
+
+    elif isinstance(invalue, collections.MutableSequence):
+        # Handle List
+        replace_indices = set()
+        for ii, value in enumerate(invalue):
+            if isinstance(value, _FutureResult):
+                replace_indices.add(ii)
+            else:
+                inplace_replace_futures(conn, value, raise_on_missing)
+
+        # Replace the values that were _FutureResult
+        for ii in replace_indices:
+            try:
+                invalue[ii] = conn.get_job(invalue[key].job_id).result
+            except NoSuchJobError:
+                if raise_on_missing:
+                    raise
+
+    else:
+        # Everything else, just return
+        return
 
 
 def unpickle(pickled_string):
@@ -465,18 +524,23 @@ class Job(object):
         self.connection._delete(self.key)
         self.connection._delete(self.children_key)
 
+
     # Job execution
     def perform(self, default_result_ttl=90):
         """
         Invokes the job function with the job arguments.
         """
         self.connection._persist(self.key)
-
         exc_info = None
         self.ttl = -1
         _job_stack.push(self.id)
         try:
-            self._result = self.func(*self.args, **self.kwargs)
+            args = list(self.args)
+            kwargs = dict(self.kwargs)
+
+            inplace_replace_futures(self.connection, args, True)
+            inplace_replace_futures(self.connection, kwargs, True)
+            self._result = self.func(*args, **kwargs)
         except Exception:
             exc_info = sys.exc_info()
             raise
@@ -703,10 +767,10 @@ class _FutureResult(object):
 
 def _find_future_results(in_container):
     out = []
-    if isinstance(in_container, dict):
-        for value in in_container.values():
-            out.extend(_find_future_results(value))
-    elif hasattr(in_container, '__iter__'):
+    if isinstance(in_container, collections.Mapping):
+        for key in in_container:
+            out.extend(_find_future_results(in_container[key]))
+    elif isinstance(in_container, collections.Iterable):
         for value in in_container:
             out.extend(_find_future_results(value))
     elif isinstance(in_container, _FutureResult):

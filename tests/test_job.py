@@ -466,6 +466,7 @@ class TestJob(RQTestCase):
         self.assertEqual(step_3.parent_ids, [step_1.id, step_2.id])
 
     def test_future_result_resolves_when_performed(self):
+        """ Future results get filled in when a job is performed """
         queue = self.conn.mkqueue()
         step_1 = queue.enqueue(fixtures.fibonacci_step, two_back=0, one_back=1)
         step_2 = queue.enqueue(fixtures.fibonacci_step, two_back=1,
