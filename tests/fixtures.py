@@ -98,3 +98,13 @@ def black_hole(job, *exc_info):
 def long_running_job(timeout=10):
     time.sleep(timeout)
     return 'Done sleeping...'
+
+
+def fibonacci_step(two_back, one_back):
+    return two_back + one_back
+
+
+def n_back_sum(lst):
+    return sum(lst)
+
+
